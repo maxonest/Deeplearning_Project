@@ -1,0 +1,15 @@
+accelerate>=0.33.0
+bitsandbytes>=0.43.0
+datasets>=2.20.0
+faiss-cpu>=1.8.0
+fastapi>=0.112.0
+numpy>=1.26.0
+peft>=0.12.0
+pydantic>=2.8.0
+pydantic-settings>=2.4.0
+python-dotenv>=1.0.1
+sentence-transformers>=3.0.1
+torch>=2.3.0
+transformers>=4.44.0
+trl>=0.9.6
+uvicorn[standard]>=0.30.0

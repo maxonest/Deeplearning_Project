@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Conda
+.conda/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Model and vector artifacts
+models/qwen/*
+models/deepseek/*
+!models/qwen/.gitkeep
+!models/deepseek/.gitkeep
+embeddings/faiss_index/*
+!embeddings/faiss_index/.gitkeep
+
+# Data artifacts
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Logs and system files
+*.log
+.DS_Store
+

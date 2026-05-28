@@ -1,35 +1,65 @@
-"""Global configuration for the local domain QA system."""
+"""Central runtime configuration.
 
+All paths are resolved from the project root by default. On Windows, copy
+`.env.example` to `.env` and set `LOCAL_MODEL_PATH` to the local model folder.
+"""
+
+from __future__ import annotations
+
+import json
 from pathlib import Path
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from typing import Any
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
-    """Runtime settings loaded from environment variables or .env."""
+    """Settings loaded from environment variables and `.env`."""
+
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     app_name: str = "Local Domain QA System"
     api_prefix: str = "/api"
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
 
+    dataset_path: Path = PROJECT_ROOT / "data" / "dataset.json"
+    raw_data_dir: Path = PROJECT_ROOT / "data" / "raw"
+    processed_data_dir: Path = PROJECT_ROOT / "data" / "processed"
+
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
-    processed_data_dir: Path = PROJECT_ROOT / "data" / "processed"
-    dataset_path: Path = PROJECT_ROOT / "data" / "dataset.json"
-
+    chunk_size: int = 600
+    chunk_overlap: int = 80
     default_top_k: int = 5
+
     max_recent_turns: int = 6
     max_context_chars: int = 6000
 
-    local_model_name: str = "Qwen/Qwen2.5-7B-Instruct"
-    local_model_endpoint: str | None = None
+    use_local_model: bool = False
+    local_model_path: Path = PROJECT_ROOT / "models" / "qwen" / "Qwen3.5-9B"
+    local_model_max_new_tokens: int = 1024
+    local_model_temperature: float = 0.2
+    local_model_top_p: float = 0.9
+    local_files_only: bool = True
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return []
+        if isinstance(value, str):
+            if value.startswith("["):
+                return json.loads(value)
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
 
 
 settings = Settings()

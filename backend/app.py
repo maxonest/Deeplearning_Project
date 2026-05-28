@@ -1,15 +1,13 @@
-"""FastAPI backend entry point for local domain QA."""
+"""FastAPI application for local domain QA."""
 
 from __future__ import annotations
 
-from typing import Any
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
 
 from backend.memory import ConversationMemory
 from backend.rag import RAGPipeline
+from backend.schemas import ChatRequest, ChatResponse, ConfigResponse, HealthResponse, SessionResponse
 from utils.config import settings
 
 
@@ -17,7 +15,7 @@ app = FastAPI(title=settings.app_name)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.cors_origins or ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -30,35 +28,43 @@ memory = ConversationMemory(
 rag_pipeline = RAGPipeline()
 
 
-class ChatRequest(BaseModel):
-    question: str = Field(..., min_length=1)
-    session_id: str | None = None
-    top_k: int = Field(default=settings.default_top_k, ge=1, le=20)
+@app.get("/health", response_model=HealthResponse)
+def health() -> HealthResponse:
+    return HealthResponse(
+        status="ok",
+        use_local_model=settings.use_local_model,
+        local_model_path=str(settings.local_model_path),
+    )
 
 
-class ChatResponse(BaseModel):
-    session_id: str
-    answer: str
-    documents: list[dict[str, Any]]
+@app.get(f"{settings.api_prefix}/config", response_model=ConfigResponse)
+def get_config() -> ConfigResponse:
+    return ConfigResponse(
+        app_name=settings.app_name,
+        default_top_k=settings.default_top_k,
+        use_local_model=settings.use_local_model,
+        local_model_path=str(settings.local_model_path),
+        embedding_model=settings.embedding_model,
+    )
 
 
-@app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+@app.post(f"{settings.api_prefix}/sessions", response_model=SessionResponse)
+def create_session() -> SessionResponse:
+    return SessionResponse(session_id=memory.create_session())
 
 
 @app.post(f"{settings.api_prefix}/chat", response_model=ChatResponse)
 def chat(request: ChatRequest) -> ChatResponse:
     session_id = request.session_id or memory.create_session()
-    memory.add_message(session_id, "user", request.question)
+    if not memory.has_session(session_id):
+        memory.clear(session_id)
 
-    memory_context = memory.build_context(session_id)
+    memory.add_message(session_id, "user", request.question)
     result = rag_pipeline.answer(
         question=request.question,
-        memory_context=memory_context,
+        memory_context=memory.build_context(session_id),
         top_k=request.top_k,
     )
-
     answer = result["answer"]
     memory.add_message(session_id, "assistant", answer)
 

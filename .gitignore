@@ -1,5 +1,7 @@
 # Python
 __pycache__/
+.pycache-check/
+.pytest_cache/
 *.py[cod]
 *.pyo
 .Python
@@ -33,4 +35,3 @@ data/processed/*
 # Logs and system files
 *.log
 .DS_Store
-

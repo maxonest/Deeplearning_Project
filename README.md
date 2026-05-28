@@ -1,117 +1,157 @@
 # Local Domain QA System
 
-本项目是一个本地专业知识领域问答系统骨架，覆盖数据集构建、本地向量知识库、LoRA/QLoRA 微调、本地 RAG、多轮对话记忆、FastAPI 后端和 React 前端。
+本项目是一套本地专业知识领域问答系统，包含数据集处理、FAISS 向量知识库、RAG 后端、本地大模型推理、LoRA/QLoRA 微调、React 前端、Windows 启动器和自动化测试。
 
-## 技术栈
+## 功能模块
 
-- Python 3.10+
-- FastAPI 后端 API
-- React 18 + Vite 前端
-- FAISS 本地向量检索
-- sentence-transformers 文本向量化
-- Transformers + PEFT + TRL 进行 LoRA/QLoRA 微调
-- 推荐 GPU: RTX 4090 24GB 或更高
+- 数据集构建：JSON/JSONL 数据加载、字段标准化、训练/验证/测试划分。
+- 知识库构建：读取 `txt/md/csv` 语料，切块后用 sentence-transformers 生成 embedding，并保存 FAISS 索引。
+- 本地 RAG：FastAPI 接收问题，管理多轮会话，检索 top-k 文档，拼接上下文后调用本地模型。
+- 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM。
+- 微调训练：基于 Transformers Trainer + PEFT 进行 LoRA/QLoRA SFT。
+- 前端页面：React 18 + Vite 多轮对话 UI，支持 top-k 参数和召回来源展示。
+- 测试：覆盖数据处理、多轮记忆、RAG 提示词链路和 FastAPI 接口。
 
 ## 目录结构
 
 ```text
 project_root/
+├─ backend/                 # FastAPI、RAG、多轮记忆、本地模型客户端
 ├─ data/
-│  ├─ raw/              # 原始语料文件
-│  ├─ processed/        # 清洗后的文本
-│  └─ dataset.json      # 生成的 JSON 数据集
-├─ embeddings/
-│  ├─ faiss_index/      # FAISS 索引文件
-│  └─ embed_utils.py    # Embedding 生成脚本
+│  ├─ raw/                  # 原始语料，不提交大文件
+│  ├─ processed/            # 清洗后语料，不提交大文件
+│  └─ dataset.json          # SFT 示例数据集
+├─ embeddings/              # FAISS 知识库构建与检索代码
+├─ frontend/                # React 18 + Vite 前端
 ├─ models/
-│  ├─ qwen/             # Qwen 模型权重
-│  ├─ deepseek/         # DeepSeek 模型权重
-│  └─ train_lora.py     # LoRA/QLoRA 微调脚本
-├─ backend/
-│  ├─ app.py            # FastAPI 后端主入口
-│  ├─ rag.py            # RAG 检索逻辑
-│  └─ memory.py         # 多轮对话上下文管理
-├─ frontend/
-│  ├─ src/
-│  │  ├─ components/    # React UI 组件
-│  │  └─ pages/         # 页面文件
-│  └─ package.json
-├─ utils/
-│  ├─ data_loader.py    # 数据加载与处理
-│  ├─ logging_utils.py  # 日志工具
-│  └─ config.py         # 全局配置
-├─ requirements.txt
-└─ run.sh
+│  ├─ qwen/                 # Qwen 本地权重目录，不提交 GitHub
+│  ├─ deepseek/             # DeepSeek 本地权重目录，不提交 GitHub
+│  ├─ run_local_model.py    # 本地模型单独推理测试
+│  └─ train_lora.py         # LoRA/QLoRA 训练脚本
+├─ tests/                   # pytest 测试
+├─ utils/                   # 配置、数据处理、日志工具
+├─ .env.example             # Windows/本地模型配置样例
+├─ requirements.txt         # Linux/通用依赖，含训练依赖
+├─ requirements-windows.txt # Windows 推理部署依赖
+├─ run.sh                   # macOS/Linux 启动脚本
+└─ start_windows.py         # Windows 启动脚本
 ```
 
-## 快速开始
+## Windows 机房部署
 
-```bash
-# 创建并激活 Conda 环境
+假设项目在：
+
+```text
+D:/lyx/deep_learning_project
+```
+
+模型在：
+
+```text
+D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B
+```
+
+### 1. 创建环境
+
+在 Anaconda Prompt 或 PowerShell 中执行：
+
+```powershell
+cd D:/lyx/deep_learning_project
 conda create -n local-domain-qa python=3.10 -y
 conda activate local-domain-qa
 
-# 安装 Python 依赖
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+conda install -c conda-forge faiss-cpu -y
+pip install -r requirements-windows.txt
+```
+
+Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。
+
+### 2. 配置模型路径
+
+```powershell
+copy .env.example .env
+```
+
+确认 `.env` 中：
+
+```env
+USE_LOCAL_MODEL=true
+LOCAL_MODEL_PATH=D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B
+LOCAL_MODEL_MAX_NEW_TOKENS=1024
+LOCAL_MODEL_TEMPERATURE=0.2
+LOCAL_MODEL_TOP_P=0.9
+```
+
+### 3. 单独测试模型
+
+```powershell
+python models/run_local_model.py --prompt "你好，请介绍一下你自己"
+```
+
+如果能正常输出，再启动系统。
+
+### 4. 启动前后端
+
+Windows 不使用 `run.sh`：
+
+```powershell
+python start_windows.py
+```
+
+访问：
+
+```text
+http://localhost:5173
+```
+
+后端地址：
+
+```text
+http://localhost:8000
+```
+
+## macOS/Linux 快速开始
+
+```bash
+conda create -n local-domain-qa python=3.10 -y
+conda activate local-domain-qa
 pip install -r requirements.txt
 
-# 安装前端依赖
 cd frontend
 npm install
 cd ..
 
-# 启动前后端服务
 ./run.sh
 ```
 
-也可以使用项目内置的 Conda 环境文件：
+## 构建 FAISS 知识库
 
-```bash
-conda env create -f environment.yml
-conda activate local-domain-qa
-cd frontend && npm install && cd ..
-./run.sh
+把语料放入：
+
+```text
+data/processed/
 ```
 
-后端默认运行在 `http://localhost:8000`，前端默认运行在 `http://localhost:5173`。
+支持 `.txt`、`.md`、`.csv`。
 
-## GitHub 上传
-
-上传前建议只提交源码、配置和示例数据，不提交 `node_modules`、`dist`、模型权重、FAISS 索引、原始语料和 Python 缓存文件。项目已提供 `.gitignore` 过滤这些生成文件。
+构建索引：
 
 ```bash
-git init
-git add .
-git commit -m "Initial local domain QA system"
-git branch -M main
-git remote add origin https://github.com/<your-username>/<your-repo>.git
-git push -u origin main
+python embeddings/embed_utils.py build \
+  --input data/processed \
+  --output embeddings/faiss_index
 ```
 
-如果你已经在 GitHub 创建了空仓库，并安装了 GitHub CLI，也可以用：
+测试检索：
 
 ```bash
-gh repo create <your-repo> --public --source=. --remote=origin --push
+python embeddings/embed_utils.py query "你的问题" --top_k 5
 ```
-
-## 前端页面预览
-
-GitHub 仓库页面本身只能预览 README 和代码，不能直接运行 React 前端。要在线预览前端页面，可以使用 GitHub Pages 部署 `frontend` 的 Vite 构建产物。
-
-本地构建：
-
-```bash
-cd frontend
-npm install
-npm run build
-```
-
-然后在 GitHub 仓库中进入 `Settings -> Pages`，选择 GitHub Actions 或部署分支，将 `frontend/dist` 发布为静态站点。
-
-注意：当前前端会调用本地后端 `http://localhost:8000`。部署到 GitHub Pages 后，页面可以打开，但问答接口只有在你的本机同时运行后端、或你把后端部署到公网并设置 `VITE_API_BASE_URL` 时才可用。
 
 ## 数据集格式
 
-`data/dataset.json` 使用 JSON Lines 或 JSON Array 均可。推荐字段：
+`data/dataset.json` 支持 JSON Array 或 JSON Lines。推荐格式：
 
 ```json
 {
@@ -124,27 +164,78 @@ npm run build
 }
 ```
 
-## 构建向量知识库
+划分数据集：
 
 ```bash
-python embeddings/embed_utils.py \
-  --input data/processed \
-  --output embeddings/faiss_index
+python utils/data_loader.py --input data/dataset.json --output_dir data
 ```
 
 ## LoRA/QLoRA 微调
 
+LoRA：
+
 ```bash
 python models/train_lora.py \
-  --model_name_or_path Qwen/Qwen2.5-7B-Instruct \
+  --model_name_or_path models/qwen/Qwen3.5-9B \
   --dataset_path data/dataset.json \
   --output_dir models/qwen/lora_adapter \
-  --use_qlora
+  --local_files_only \
+  --bf16
 ```
 
-## 后续开发建议
+QLoRA：
 
-- 将 `backend/rag.py` 中的 `LocalLLMClient` 替换为 vLLM、Ollama、llama.cpp 或 Transformers 本地推理服务。
-- 根据专业领域补充 `data/raw`，再清洗到 `data/processed`。
-- 微调前先验证样本质量、回答风格和拒答边界。
-- 生产部署时增加鉴权、限流、审计日志和模型输出安全过滤。
+```bash
+python models/train_lora.py \
+  --model_name_or_path models/qwen/Qwen3.5-9B \
+  --dataset_path data/dataset.json \
+  --output_dir models/qwen/qlora_adapter \
+  --local_files_only \
+  --use_qlora \
+  --bf16
+```
+
+Windows 上 QLoRA 依赖 `bitsandbytes`，如果安装困难，优先使用 LoRA 或在 Linux/CUDA 环境训练。
+
+## 测试
+
+单元测试不需要真实模型权重或 FAISS 索引：
+
+```bash
+pytest
+```
+
+测试覆盖：
+
+- `utils.data_loader`
+- `backend.memory`
+- `backend.rag`
+- `backend.app`
+
+## API
+
+健康检查：
+
+```bash
+curl http://localhost:8000/health
+```
+
+问答接口：
+
+```bash
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question":"什么是本地RAG？","top_k":5}'
+```
+
+## GitHub 上传
+
+模型权重、FAISS 索引、语料、`node_modules` 和构建产物已被 `.gitignore` 忽略。
+
+```bash
+git add .
+git commit -m "Rebuild local domain QA system"
+git push
+```
+
+GitHub Pages 只能预览前端静态页面；完整问答功能需要本地或公网后端。

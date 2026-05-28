@@ -1,4 +1,8 @@
-"""Build and query a FAISS vector knowledge base from local text files."""
+"""FAISS knowledge-base construction and retrieval.
+
+Heavy dependencies (`faiss`, `sentence-transformers`) are imported lazily so
+backend tests can run without a GPU model or an existing vector index.
+"""
 
 from __future__ import annotations
 
@@ -6,130 +10,209 @@ import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Any
 
-import faiss
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+from utils.config import settings
+from utils.data_loader import read_corpus_files
 
 
-@dataclass
+INDEX_FILE = "index.faiss"
+METADATA_FILE = "metadata.json"
+
+
+@dataclass(frozen=True)
 class DocumentChunk:
     id: int
     source: str
     text: str
 
 
-def read_text_files(input_path: str | Path) -> list[tuple[str, str]]:
-    """Read .txt/.md files from a file or directory."""
+@dataclass(frozen=True)
+class SearchHit:
+    id: int
+    source: str
+    text: str
+    score: float
 
-    input_path = Path(input_path)
-    files = [input_path] if input_path.is_file() else sorted(input_path.rglob("*"))
-    docs: list[tuple[str, str]] = []
-    for file_path in files:
-        if file_path.suffix.lower() not in {".txt", ".md"}:
-            continue
-        text = file_path.read_text(encoding="utf-8", errors="ignore").strip()
-        if text:
-            docs.append((str(file_path), text))
-    return docs
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
-def chunk_text(text: str, chunk_size: int = 600, overlap: int = 80) -> list[str]:
+def _load_faiss():
+    try:
+        import faiss
+    except ImportError as exc:
+        raise RuntimeError("faiss is not installed. Install faiss-cpu or use conda-forge faiss-cpu.") from exc
+    return faiss
+
+
+def _load_sentence_transformer():
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError as exc:
+        raise RuntimeError("sentence-transformers is not installed.") from exc
+    return SentenceTransformer
+
+
+def chunk_text(text: str, chunk_size: int = settings.chunk_size, overlap: int = settings.chunk_overlap) -> list[str]:
     """Split text into overlapping character chunks."""
 
-    if chunk_size <= overlap:
-        raise ValueError("chunk_size must be greater than overlap.")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive.")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be >= 0 and smaller than chunk_size.")
 
     chunks: list[str] = []
-    start = 0
-    while start < len(text):
+    step = chunk_size - overlap
+    for start in range(0, len(text), step):
         chunk = text[start : start + chunk_size].strip()
         if chunk:
             chunks.append(chunk)
-        start += chunk_size - overlap
     return chunks
 
 
 def build_chunks(input_path: str | Path, chunk_size: int, overlap: int) -> list[DocumentChunk]:
     chunks: list[DocumentChunk] = []
-    for source, text in read_text_files(input_path):
+    for source, text in read_corpus_files(input_path):
         for chunk in chunk_text(text, chunk_size=chunk_size, overlap=overlap):
             chunks.append(DocumentChunk(id=len(chunks), source=source, text=chunk))
     return chunks
 
 
-def encode_texts(model: SentenceTransformer, texts: list[str], batch_size: int = 32) -> np.ndarray:
-    embeddings = model.encode(
-        texts,
-        batch_size=batch_size,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=True,
-    )
-    return embeddings.astype("float32")
+class FaissKnowledgeBase:
+    """A small local vector store backed by FAISS."""
+
+    def __init__(
+        self,
+        index_dir: str | Path = settings.faiss_index_dir,
+        embedding_model: str = settings.embedding_model,
+        batch_size: int = 32,
+    ) -> None:
+        self.index_dir = Path(index_dir)
+        self.embedding_model = embedding_model
+        self.batch_size = batch_size
+        self._model = None
+        self._index = None
+        self._metadata: list[dict[str, Any]] | None = None
+
+    @property
+    def exists(self) -> bool:
+        return (self.index_dir / INDEX_FILE).exists() and (self.index_dir / METADATA_FILE).exists()
+
+    def _encoder(self):
+        if self._model is None:
+            SentenceTransformer = _load_sentence_transformer()
+            self._model = SentenceTransformer(self.embedding_model)
+        return self._model
+
+    def encode(self, texts: list[str]) -> np.ndarray:
+        embeddings = self._encoder().encode(
+            texts,
+            batch_size=self.batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=len(texts) > self.batch_size,
+        )
+        return embeddings.astype("float32")
+
+    def build(self, input_path: str | Path, chunk_size: int, overlap: int) -> int:
+        chunks = build_chunks(input_path, chunk_size=chunk_size, overlap=overlap)
+        if not chunks:
+            raise RuntimeError(f"No text chunks found under {input_path}")
+
+        embeddings = self.encode([chunk.text for chunk in chunks])
+        self.save(embeddings, chunks)
+        return len(chunks)
+
+    def save(self, embeddings: np.ndarray, chunks: list[DocumentChunk]) -> None:
+        if embeddings.ndim != 2:
+            raise ValueError("embeddings must be a 2D array.")
+        if len(chunks) != embeddings.shape[0]:
+            raise ValueError("chunks and embeddings must have the same length.")
+
+        faiss = _load_faiss()
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings)
+        faiss.write_index(index, str(self.index_dir / INDEX_FILE))
+
+        payload = {
+            "embedding_model": self.embedding_model,
+            "chunks": [asdict(chunk) for chunk in chunks],
+        }
+        (self.index_dir / METADATA_FILE).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        self._index = index
+        self._metadata = payload["chunks"]
+
+    def load(self) -> None:
+        if not self.exists:
+            raise FileNotFoundError(f"FAISS index not found in {self.index_dir}")
+
+        faiss = _load_faiss()
+        self._index = faiss.read_index(str(self.index_dir / INDEX_FILE))
+        payload = json.loads((self.index_dir / METADATA_FILE).read_text(encoding="utf-8"))
+        if isinstance(payload, list):
+            self._metadata = payload
+        else:
+            self._metadata = payload.get("chunks", [])
+
+    def search(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
+        if not query.strip():
+            return []
+        if self._index is None or self._metadata is None:
+            self.load()
+
+        assert self._index is not None
+        assert self._metadata is not None
+
+        query_vector = self.encode([query])
+        scores, indices = self._index.search(query_vector, top_k)
+
+        hits: list[dict[str, Any]] = []
+        for score, index in zip(scores[0], indices[0], strict=False):
+            if index < 0 or index >= len(self._metadata):
+                continue
+            item = dict(self._metadata[index])
+            item["score"] = float(score)
+            hits.append(item)
+        return hits
 
 
-def save_faiss_index(embeddings: np.ndarray, chunks: list[DocumentChunk], output_dir: str | Path) -> None:
-    output_dir = Path(output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build or query a FAISS knowledge base.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
-    index = faiss.IndexFlatIP(embeddings.shape[1])
-    index.add(embeddings)
-    faiss.write_index(index, str(output_dir / "index.faiss"))
+    build_parser = subparsers.add_parser("build")
+    build_parser.add_argument("--input", default=str(settings.processed_data_dir))
+    build_parser.add_argument("--output", default=str(settings.faiss_index_dir))
+    build_parser.add_argument("--model", default=settings.embedding_model)
+    build_parser.add_argument("--chunk_size", type=int, default=settings.chunk_size)
+    build_parser.add_argument("--overlap", type=int, default=settings.chunk_overlap)
 
-    metadata = [asdict(chunk) for chunk in chunks]
-    (output_dir / "metadata.json").write_text(
-        json.dumps(metadata, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    query_parser = subparsers.add_parser("query")
+    query_parser.add_argument("query")
+    query_parser.add_argument("--index", default=str(settings.faiss_index_dir))
+    query_parser.add_argument("--model", default=settings.embedding_model)
+    query_parser.add_argument("--top_k", type=int, default=settings.default_top_k)
 
-
-def load_faiss_index(index_dir: str | Path) -> tuple[faiss.Index, list[dict]]:
-    index_dir = Path(index_dir)
-    index = faiss.read_index(str(index_dir / "index.faiss"))
-    metadata = json.loads((index_dir / "metadata.json").read_text(encoding="utf-8"))
-    return index, metadata
-
-
-def search(
-    query: str,
-    index_dir: str | Path,
-    model_name: str,
-    top_k: int = 5,
-) -> list[dict]:
-    model = SentenceTransformer(model_name)
-    index, metadata = load_faiss_index(index_dir)
-    query_vector = encode_texts(model, [query], batch_size=1)
-    scores, indices = index.search(query_vector, top_k)
-
-    results: list[dict] = []
-    for score, idx in zip(scores[0], indices[0], strict=False):
-        if idx < 0:
-            continue
-        item = dict(metadata[idx])
-        item["score"] = float(score)
-        results.append(item)
-    return results
+    return parser.parse_args()
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build FAISS index from local corpus.")
-    parser.add_argument("--input", default="data/processed")
-    parser.add_argument("--output", default="embeddings/faiss_index")
-    parser.add_argument("--model", default="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
-    parser.add_argument("--chunk_size", type=int, default=600)
-    parser.add_argument("--overlap", type=int, default=80)
-    parser.add_argument("--batch_size", type=int, default=32)
-    args = parser.parse_args()
-
-    chunks = build_chunks(args.input, chunk_size=args.chunk_size, overlap=args.overlap)
-    if not chunks:
-        raise RuntimeError(f"No text chunks found under {args.input}")
-
-    model = SentenceTransformer(args.model)
-    embeddings = encode_texts(model, [chunk.text for chunk in chunks], batch_size=args.batch_size)
-    save_faiss_index(embeddings, chunks, args.output)
-    print(f"Saved {len(chunks)} chunks to {args.output}")
+    args = parse_args()
+    if args.command == "build":
+        kb = FaissKnowledgeBase(index_dir=args.output, embedding_model=args.model)
+        count = kb.build(args.input, chunk_size=args.chunk_size, overlap=args.overlap)
+        print(f"Saved {count} chunks to {args.output}")
+    elif args.command == "query":
+        kb = FaissKnowledgeBase(index_dir=args.index, embedding_model=args.model)
+        print(json.dumps(kb.search(args.query, top_k=args.top_k), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

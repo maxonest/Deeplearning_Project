@@ -1,68 +1,88 @@
-"""Local RAG retrieval and prompt assembly."""
+"""Retrieval augmented generation pipeline."""
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
-from embeddings.embed_utils import search
+from backend.llm import LLMClient, build_llm_client
 from utils.config import settings
 
 
-class LLMClient(Protocol):
-    def generate(self, prompt: str) -> str:
-        """Generate an answer from a prompt."""
+class Retriever(Protocol):
+    def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+        """Return top-k document hits."""
 
 
-class LocalLLMClient:
-    """Placeholder local LLM client.
+class FaissRetriever:
+    """Lazy FAISS retriever wrapper."""
 
-    Replace this class with a vLLM, Ollama, llama.cpp, or Transformers backend.
-    """
+    def __init__(self, index_dir: str | Path, embedding_model: str) -> None:
+        self.index_dir = Path(index_dir)
+        self.embedding_model = embedding_model
+        self._kb = None
 
-    def generate(self, prompt: str) -> str:
-        return (
-            "这是一个本地模型占位回答。请将 backend/rag.py 中的 LocalLLMClient "
-            "替换为实际的大模型推理服务。\n\n"
-            f"已接收提示词长度: {len(prompt)} 字符"
-        )
+    @property
+    def exists(self) -> bool:
+        return (self.index_dir / "index.faiss").exists() and (self.index_dir / "metadata.json").exists()
+
+    def _knowledge_base(self):
+        if self._kb is None:
+            from embeddings.embed_utils import FaissKnowledgeBase
+
+            self._kb = FaissKnowledgeBase(index_dir=self.index_dir, embedding_model=self.embedding_model)
+        return self._kb
+
+    def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+        if not self.exists:
+            return []
+        return self._knowledge_base().search(query, top_k=top_k)
 
 
 class RAGPipeline:
     def __init__(
         self,
-        index_dir: str | Path = settings.faiss_index_dir,
-        embedding_model: str = settings.embedding_model,
         llm_client: LLMClient | None = None,
+        retriever: Retriever | None = None,
+        max_context_chars: int = settings.max_context_chars,
     ) -> None:
-        self.index_dir = Path(index_dir)
-        self.embedding_model = embedding_model
-        self.llm_client = llm_client or LocalLLMClient()
-
-    def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict]:
-        if not (self.index_dir / "index.faiss").exists():
-            return []
-        return search(
-            query=query,
-            index_dir=self.index_dir,
-            model_name=self.embedding_model,
-            top_k=top_k,
+        self.llm_client = llm_client or build_llm_client(
+            use_local_model=settings.use_local_model,
+            model_path=settings.local_model_path,
+            max_new_tokens=settings.local_model_max_new_tokens,
+            temperature=settings.local_model_temperature,
+            top_p=settings.local_model_top_p,
+            local_files_only=settings.local_files_only,
         )
+        self.retriever = retriever or FaissRetriever(
+            index_dir=settings.faiss_index_dir,
+            embedding_model=settings.embedding_model,
+        )
+        self.max_context_chars = max_context_chars
 
-    def build_prompt(self, question: str, documents: list[dict], memory_context: str = "") -> str:
+    def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
+        return self.retriever.search(query, top_k=top_k)
+
+    def build_prompt(self, question: str, documents: list[dict[str, Any]], memory_context: str = "") -> str:
         context_blocks = []
-        for idx, doc in enumerate(documents, start=1):
-            source = doc.get("source", "unknown")
-            text = doc.get("text", "")
-            context_blocks.append(f"[文档 {idx}] 来源: {source}\n{text}")
+        for index, document in enumerate(documents, start=1):
+            source = document.get("source", "unknown")
+            text = document.get("text", "")
+            score = document.get("score")
+            score_text = f" | score={score:.4f}" if isinstance(score, float) else ""
+            context_blocks.append(f"[文档 {index}] 来源: {source}{score_text}\n{text}")
 
         retrieved_context = "\n\n".join(context_blocks) or "未检索到本地知识库内容。"
+        memory_budget = max(1000, self.max_context_chars // 3)
+        retrieval_budget = max(1000, self.max_context_chars - memory_budget)
+        memory = (memory_context or "暂无")[-memory_budget:]
+        retrieved_context = retrieved_context[-retrieval_budget:]
 
         return f"""你是一个专业、严谨的本地领域知识问答助手。
 请优先依据【本地知识库】回答；如果知识库不足，请明确说明不确定，并给出可验证的建议。
 
 【多轮对话记忆】
-{memory_context or "暂无"}
+{memory}
 
 【本地知识库】
 {retrieved_context}
@@ -76,7 +96,7 @@ class RAGPipeline:
 3. 不要编造知识库中不存在的关键事实。
 """
 
-    def answer(self, question: str, memory_context: str = "", top_k: int = settings.default_top_k) -> dict:
+    def answer(self, question: str, memory_context: str = "", top_k: int = settings.default_top_k) -> dict[str, Any]:
         documents = self.retrieve(question, top_k=top_k)
         prompt = self.build_prompt(question, documents, memory_context=memory_context)
         answer = self.llm_client.generate(prompt)

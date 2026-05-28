@@ -1,4 +1,4 @@
-"""Dataset loading, normalization, and train/validation/test splitting."""
+"""Dataset utilities for SFT data and corpus preparation."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ import random
 from pathlib import Path
 from typing import Any
 
-from datasets import Dataset, DatasetDict
+
+DEFAULT_INSTRUCTION = "根据专业知识回答用户问题"
 
 
 def load_json_records(path: str | Path) -> list[dict[str, Any]]:
-    """Load JSON array or JSON Lines records."""
+    """Load a JSON array or JSON Lines file and normalize records."""
 
     path = Path(path)
     if not path.exists():
@@ -23,29 +24,32 @@ def load_json_records(path: str | Path) -> list[dict[str, Any]]:
         return []
 
     if text.startswith("["):
-        records = json.loads(text)
+        raw_records = json.loads(text)
     else:
-        records = [json.loads(line) for line in text.splitlines() if line.strip()]
+        raw_records = [json.loads(line) for line in text.splitlines() if line.strip()]
 
-    if not isinstance(records, list):
+    if not isinstance(raw_records, list):
         raise ValueError("Dataset must be a JSON array or JSON Lines file.")
-    return [normalize_record(record) for record in records]
+    return [normalize_record(record) for record in raw_records]
 
 
 def normalize_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Normalize common QA fields into instruction/input/output."""
+    """Normalize common field names into instruction/input/output."""
 
-    instruction = record.get("instruction") or "根据专业知识回答用户问题"
-    question = record.get("input") or record.get("question") or record.get("query") or ""
-    answer = record.get("output") or record.get("answer") or record.get("response") or ""
+    instruction = record.get("instruction") or DEFAULT_INSTRUCTION
+    user_input = record.get("input") or record.get("question") or record.get("query") or ""
+    output = record.get("output") or record.get("answer") or record.get("response") or ""
     metadata = record.get("metadata") or {}
 
-    return {
+    normalized = {
         "instruction": str(instruction).strip(),
-        "input": str(question).strip(),
-        "output": str(answer).strip(),
-        "metadata": metadata,
+        "input": str(user_input).strip(),
+        "output": str(output).strip(),
+        "metadata": metadata if isinstance(metadata, dict) else {"raw": metadata},
     }
+    if not normalized["input"] or not normalized["output"]:
+        raise ValueError(f"Record is missing input/output fields: {record}")
+    return normalized
 
 
 def split_records(
@@ -54,16 +58,22 @@ def split_records(
     val_ratio: float = 0.1,
     seed: int = 42,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Split records into train, validation, and test subsets."""
+    """Deterministically split records into train/validation/test."""
 
-    if not 0 < train_ratio < 1 or not 0 <= val_ratio < 1:
-        raise ValueError("train_ratio and val_ratio must be in (0, 1).")
+    if not records:
+        return {"train": [], "validation": [], "test": []}
+    if not 0 < train_ratio <= 1:
+        raise ValueError("train_ratio must be in (0, 1].")
+    if not 0 <= val_ratio < 1:
+        raise ValueError("val_ratio must be in [0, 1).")
+    if train_ratio + val_ratio > 1:
+        raise ValueError("train_ratio + val_ratio must be <= 1.")
 
     items = records[:]
     random.Random(seed).shuffle(items)
-    train_end = int(len(items) * train_ratio)
-    val_end = train_end + int(len(items) * val_ratio)
 
+    train_end = max(1, int(len(items) * train_ratio))
+    val_end = train_end + int(len(items) * val_ratio)
     return {
         "train": items[:train_end],
         "validation": items[train_end:val_end],
@@ -71,38 +81,66 @@ def split_records(
     }
 
 
-def to_dataset_dict(splits: dict[str, list[dict[str, Any]]]) -> DatasetDict:
+def save_splits(splits: dict[str, list[dict[str, Any]]], output_dir: str | Path) -> None:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for name, records in splits.items():
+        output_path = output_dir / f"{name}.json"
+        output_path.write_text(json.dumps(records, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def to_dataset_dict(splits: dict[str, list[dict[str, Any]]]):
+    """Convert splits to a Hugging Face DatasetDict lazily."""
+
+    from datasets import Dataset, DatasetDict
+
     return DatasetDict({name: Dataset.from_list(records) for name, records in splits.items()})
 
 
 def format_sft_prompt(record: dict[str, Any]) -> str:
-    """Format one record for supervised fine-tuning."""
+    """Format one record in ChatML style for supervised fine-tuning."""
 
+    instruction = record["instruction"].strip()
+    user_input = record["input"].strip()
+    output = record["output"].strip()
+    user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
     return (
         "<|im_start|>system\n你是一个专业、严谨的领域知识问答助手。<|im_end|>\n"
-        f"<|im_start|>user\n{record['instruction']}\n\n{record['input']}<|im_end|>\n"
-        f"<|im_start|>assistant\n{record['output']}<|im_end|>"
+        f"<|im_start|>user\n{user_content}<|im_end|>\n"
+        f"<|im_start|>assistant\n{output}<|im_end|>"
     )
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser()
+def read_corpus_files(input_path: str | Path) -> list[tuple[str, str]]:
+    """Read text-like corpus files from a file or directory."""
+
+    input_path = Path(input_path)
+    files = [input_path] if input_path.is_file() else sorted(input_path.rglob("*"))
+    docs: list[tuple[str, str]] = []
+    for file_path in files:
+        if file_path.suffix.lower() not in {".txt", ".md", ".csv"}:
+            continue
+        text = file_path.read_text(encoding="utf-8", errors="ignore").strip()
+        if text:
+            docs.append((str(file_path), text))
+    return docs
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Normalize and split QA dataset.")
     parser.add_argument("--input", default="data/dataset.json")
     parser.add_argument("--output_dir", default="data")
-    args = parser.parse_args()
+    parser.add_argument("--seed", type=int, default=42)
+    return parser.parse_args()
 
+
+def main() -> None:
+    args = parse_args()
     records = load_json_records(args.input)
-    splits = split_records(records)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    for split_name, split_records_ in splits.items():
-        output_path = output_dir / f"{split_name}.json"
-        output_path.write_text(
-            json.dumps(split_records_, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-        print(f"Wrote {len(split_records_)} records to {output_path}")
+    splits = split_records(records, seed=args.seed)
+    save_splits(splits, args.output_dir)
+    for name, values in splits.items():
+        print(f"{name}: {len(values)} records")
 
 
 if __name__ == "__main__":

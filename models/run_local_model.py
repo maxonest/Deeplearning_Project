@@ -1,7 +1,7 @@
 """Run a local model with Python before starting the web app.
 
 Windows example:
-    python models/run_local_model.py --model_path D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B --prompt "你好，介绍一下你自己"
+    python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --prompt "你好，介绍一下你自己"
 """
 
 from __future__ import annotations
@@ -32,8 +32,11 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    model_path = Path(args.model_path)
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
     client = TransformersLLMClient(
-        model_path=args.model_path,
+        model_path=model_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,

@@ -42,13 +42,13 @@ project_root/
 假设项目在：
 
 ```text
-D:/lyx/deep_learning_project
+D:/lyx/Deeplearning_Project
 ```
 
 模型在：
 
 ```text
-D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B
+D:/lyx/Deeplearning_Project/models/qwen/Qwen3.5-9B
 ```
 
 ### 1. 创建环境
@@ -56,7 +56,7 @@ D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B
 在 Anaconda Prompt 或 PowerShell 中执行：
 
 ```powershell
-cd D:/lyx/deep_learning_project
+cd D:/lyx/Deeplearning_Project
 conda create -n local-domain-qa python=3.10 -y
 conda activate local-domain-qa
 
@@ -77,7 +77,7 @@ copy .env.example .env
 
 ```env
 USE_LOCAL_MODEL=true
-LOCAL_MODEL_PATH=D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B
+LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
 LOCAL_MODEL_MAX_NEW_TOKENS=1024
 LOCAL_MODEL_TEMPERATURE=0.2
 LOCAL_MODEL_TOP_P=0.9

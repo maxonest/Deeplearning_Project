@@ -56,8 +56,7 @@ class TransformersLLMClient:
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"Local model path does not exist: {self.model_path}. "
-                "Set LOCAL_MODEL_PATH in .env, for example "
-                "D:/lyx/deep_learning_project/models/qwen/Qwen3.5-9B."
+                "Set LOCAL_MODEL_PATH in .env, for example models/qwen/Qwen3.5-9B."
             )
 
         import torch

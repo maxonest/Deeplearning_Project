@@ -61,5 +61,19 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
+    @field_validator(
+        "dataset_path",
+        "raw_data_dir",
+        "processed_data_dir",
+        "faiss_index_dir",
+        "local_model_path",
+        mode="after",
+    )
+    @classmethod
+    def resolve_relative_paths(cls, value: Path) -> Path:
+        if value.is_absolute():
+            return value
+        return PROJECT_ROOT / value
+
 
 settings = Settings()

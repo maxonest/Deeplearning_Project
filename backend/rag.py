@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Iterator, Protocol
 
 from backend.llm import LLMClient, build_llm_client
 from utils.config import settings
@@ -52,6 +52,7 @@ class RAGPipeline:
             max_new_tokens=settings.local_model_max_new_tokens,
             temperature=settings.local_model_temperature,
             top_p=settings.local_model_top_p,
+            enable_thinking=settings.local_model_enable_thinking,
             local_files_only=settings.local_files_only,
         )
         self.retriever = retriever or FaissRetriever(
@@ -96,12 +97,29 @@ class RAGPipeline:
 3. 不要编造知识库中不存在的关键事实。
 """
 
-    def answer(self, question: str, memory_context: str = "", top_k: int = settings.default_top_k) -> dict[str, Any]:
+    def answer(
+        self,
+        question: str,
+        memory_context: str = "",
+        top_k: int = settings.default_top_k,
+        enable_thinking: bool | None = None,
+    ) -> dict[str, Any]:
         documents = self.retrieve(question, top_k=top_k)
         prompt = self.build_prompt(question, documents, memory_context=memory_context)
-        answer = self.llm_client.generate(prompt)
+        answer = self.llm_client.generate(prompt, enable_thinking=enable_thinking)
         return {
             "answer": answer,
             "documents": documents,
             "prompt": prompt,
         }
+
+    def stream_answer(
+        self,
+        question: str,
+        memory_context: str = "",
+        top_k: int = settings.default_top_k,
+        enable_thinking: bool | None = None,
+    ) -> tuple[list[dict[str, Any]], Iterator[str]]:
+        documents = self.retrieve(question, top_k=top_k)
+        prompt = self.build_prompt(question, documents, memory_context=memory_context)
+        return documents, self.llm_client.stream_generate(prompt, enable_thinking=enable_thinking)

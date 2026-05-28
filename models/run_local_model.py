@@ -26,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max_new_tokens", type=int, default=settings.local_model_max_new_tokens)
     parser.add_argument("--temperature", type=float, default=settings.local_model_temperature)
     parser.add_argument("--top_p", type=float, default=settings.local_model_top_p)
+    parser.add_argument("--enable_thinking", action="store_true")
     parser.add_argument("--allow_remote_files", action="store_true", help="Allow downloading files from Hugging Face.")
     return parser.parse_args()
 
@@ -42,7 +43,7 @@ def main() -> None:
         top_p=args.top_p,
         local_files_only=not args.allow_remote_files,
     )
-    print(client.generate(args.prompt))
+    print(client.generate(args.prompt, enable_thinking=args.enable_thinking))
 
 
 if __name__ == "__main__":

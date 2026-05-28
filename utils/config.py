@@ -45,9 +45,10 @@ class Settings(BaseSettings):
 
     use_local_model: bool = False
     local_model_path: Path = PROJECT_ROOT / "models" / "qwen" / "Qwen3.5-9B"
-    local_model_max_new_tokens: int = 1024
+    local_model_max_new_tokens: int = 2048
     local_model_temperature: float = 0.2
     local_model_top_p: float = 0.9
+    local_model_enable_thinking: bool = False
     local_files_only: bool = True
 
     @field_validator("cors_origins", mode="before")

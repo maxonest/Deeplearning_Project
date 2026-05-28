@@ -19,6 +19,7 @@ class ChatRequest(BaseModel):
     question: str = Field(..., min_length=1)
     session_id: str | None = None
     top_k: int = Field(default=settings.default_top_k, ge=1, le=20)
+    enable_thinking: bool = Field(default=settings.local_model_enable_thinking)
 
 
 class ChatResponse(BaseModel):

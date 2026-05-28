@@ -65,7 +65,7 @@ conda install -c conda-forge faiss-cpu -y
 pip install -r requirements-windows.txt
 ```
 
-Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。
+Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
 
 ### 2. 配置模型路径
 
@@ -78,9 +78,10 @@ copy .env.example .env
 ```env
 USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
-LOCAL_MODEL_MAX_NEW_TOKENS=1024
+LOCAL_MODEL_MAX_NEW_TOKENS=2048
 LOCAL_MODEL_TEMPERATURE=0.2
 LOCAL_MODEL_TOP_P=0.9
+LOCAL_MODEL_ENABLE_THINKING=false
 ```
 
 ### 3. 单独测试模型
@@ -226,6 +227,26 @@ curl http://localhost:8000/health
 curl -X POST http://localhost:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"question":"什么是本地RAG？","top_k":5}'
+```
+
+流式问答接口：
+
+```bash
+curl -N -X POST http://localhost:8000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"question":"请用Markdown列出本系统模块","top_k":5}'
+```
+
+前端默认使用流式接口，回答会逐步显示。输入框中直接按 `Enter` 发送，`Shift+Enter` 换行；助手回答支持常见 Markdown 渲染，包括标题、列表、粗体、行内代码和代码块。
+
+前端输入框右侧有“深度思考”按钮。开启后，本次请求会发送 `enable_thinking=true`；关闭后会发送 `enable_thinking=false`。如果模型输出 `<think>...</think>`，前端会把思考内容放进背景色稍暗的圆角块，正常回答仍按普通 Markdown 展示。
+
+模型输出长度由 `.env` 中的 `LOCAL_MODEL_MAX_NEW_TOKENS` 控制，默认是 `2048`。如果回答经常没说完，可以尝试调到 `3072` 或 `4096`；数值越大，单次生成耗时和显存占用越高。
+
+如果模型支持 Qwen thinking 模板，默认通过 `LOCAL_MODEL_ENABLE_THINKING=false` 关闭思考模式，以减少首 token 等待时间。需要启用时改成：
+
+```env
+LOCAL_MODEL_ENABLE_THINKING=true
 ```
 
 ## GitHub 上传

@@ -10,7 +10,7 @@ class FakeLLM:
     def __init__(self):
         self.last_prompt = ""
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, enable_thinking: bool | None = None) -> str:
         self.last_prompt = prompt
         return "测试回答"
 

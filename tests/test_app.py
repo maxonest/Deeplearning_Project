@@ -4,7 +4,13 @@ import backend.app as app_module
 
 
 class FakePipeline:
-    def answer(self, question: str, memory_context: str = "", top_k: int = 5):
+    def answer(
+        self,
+        question: str,
+        memory_context: str = "",
+        top_k: int = 5,
+        enable_thinking: bool | None = None,
+    ):
         return {
             "answer": f"回答:{question}",
             "documents": [{"id": 0, "source": "fake", "text": memory_context, "score": 1.0}],

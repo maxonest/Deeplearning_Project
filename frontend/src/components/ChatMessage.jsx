@@ -1,5 +1,6 @@
 import React from "react";
 import { Bot, UserRound } from "lucide-react";
+import MarkdownMessage from "./MarkdownMessage.jsx";
 
 export default function ChatMessage({ role, content }) {
   const isUser = role === "user";
@@ -11,7 +12,9 @@ export default function ChatMessage({ role, content }) {
       </div>
       <div className="messageBody">
         <div className="messageRole">{isUser ? "用户" : "助手"}</div>
-        <div className="messageContent">{content}</div>
+        <div className="messageContent">
+          {isUser ? content : <MarkdownMessage content={content} />}
+        </div>
       </div>
     </article>
   );

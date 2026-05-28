@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 
 from backend.memory import ConversationMemory
 from backend.rag import RAGPipeline
@@ -64,6 +67,7 @@ def chat(request: ChatRequest) -> ChatResponse:
         question=request.question,
         memory_context=memory.build_context(session_id),
         top_k=request.top_k,
+        enable_thinking=request.enable_thinking,
     )
     answer = result["answer"]
     memory.add_message(session_id, "assistant", answer)
@@ -73,6 +77,41 @@ def chat(request: ChatRequest) -> ChatResponse:
         answer=answer,
         documents=result["documents"],
     )
+
+
+def sse_event(event: str, data: dict | str) -> str:
+    payload = data if isinstance(data, str) else json.dumps(data, ensure_ascii=False)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+@app.post(f"{settings.api_prefix}/chat/stream")
+def chat_stream(request: ChatRequest) -> StreamingResponse:
+    def event_generator():
+        session_id = request.session_id or memory.create_session()
+        if not memory.has_session(session_id):
+            memory.clear(session_id)
+
+        memory.add_message(session_id, "user", request.question)
+        answer_parts: list[str] = []
+
+        try:
+            documents, chunks = rag_pipeline.stream_answer(
+                question=request.question,
+                memory_context=memory.build_context(session_id),
+                top_k=request.top_k,
+                enable_thinking=request.enable_thinking,
+            )
+            yield sse_event("meta", {"session_id": session_id, "documents": documents})
+            for chunk in chunks:
+                answer_parts.append(chunk)
+                yield sse_event("delta", {"text": chunk})
+            answer = "".join(answer_parts).strip()
+            memory.add_message(session_id, "assistant", answer)
+            yield sse_event("done", {"answer": answer})
+        except Exception as exc:
+            yield sse_event("error", {"message": str(exc)})
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @app.post(f"{settings.api_prefix}/sessions/{{session_id}}/clear")

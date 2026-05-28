@@ -4,6 +4,28 @@ import ChatMessage from "../components/ChatMessage.jsx";
 import SourceList from "../components/SourceList.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
+const ASSISTANT_STREAM_KEY = "assistant-streaming";
+
+function parseSseChunk(buffer) {
+  const events = [];
+  let remaining = buffer;
+  let boundary = remaining.indexOf("\n\n");
+
+  while (boundary !== -1) {
+    const block = remaining.slice(0, boundary);
+    remaining = remaining.slice(boundary + 2);
+    const lines = block.split("\n");
+    const event = lines.find((line) => line.startsWith("event:"))?.slice(6).trim() || "message";
+    const data = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    events.push({ event, data });
+    boundary = remaining.indexOf("\n\n");
+  }
+
+  return { events, remaining };
+}
 
 export default function IndexPage() {
   const [messages, setMessages] = useState([
@@ -17,6 +39,7 @@ export default function IndexPage() {
   const [topK, setTopK] = useState(5);
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [enableThinking, setEnableThinking] = useState(false);
 
   const turnCount = useMemo(
     () => messages.filter((message) => message.role === "user").length,
@@ -33,13 +56,19 @@ export default function IndexPage() {
     setLoading(true);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/chat`, {
+      setMessages((current) => [
+        ...current,
+        { role: "assistant", content: "", streamKey: ASSISTANT_STREAM_KEY },
+      ]);
+
+      const response = await fetch(`${API_BASE_URL}/api/chat/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           question: trimmed,
           session_id: sessionId,
           top_k: topK,
+          enable_thinking: enableThinking,
         }),
       });
 
@@ -47,13 +76,50 @@ export default function IndexPage() {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const payload = await response.json();
-      setSessionId(payload.session_id);
-      setDocuments(payload.documents || []);
-      setMessages((current) => [...current, { role: "assistant", content: payload.answer }]);
+      if (!response.body) {
+        throw new Error("浏览器不支持流式响应");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder("utf-8");
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parsed = parseSseChunk(buffer);
+        buffer = parsed.remaining;
+
+        for (const item of parsed.events) {
+          const payload = item.data ? JSON.parse(item.data) : {};
+          if (item.event === "meta") {
+            setSessionId(payload.session_id);
+            setDocuments(payload.documents || []);
+          }
+          if (item.event === "delta") {
+            setMessages((current) =>
+              current.map((message) =>
+                message.streamKey === ASSISTANT_STREAM_KEY
+                  ? { ...message, content: message.content + (payload.text || "") }
+                  : message,
+              ),
+            );
+          }
+          if (item.event === "error") {
+            throw new Error(payload.message || "流式生成失败");
+          }
+        }
+      }
+
+      setMessages((current) =>
+        current.map((message) =>
+          message.streamKey === ASSISTANT_STREAM_KEY ? { role: "assistant", content: message.content } : message,
+        ),
+      );
     } catch (error) {
       setMessages((current) => [
-        ...current,
+        ...current.filter((message) => message.streamKey !== ASSISTANT_STREAM_KEY),
         {
           role: "assistant",
           content: `请求失败：${error.message}。请确认后端服务已启动。`,
@@ -149,15 +215,28 @@ export default function IndexPage() {
             rows={3}
             onChange={(event) => setQuestion(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              if (event.key === "Enter" && !event.shiftKey) {
+                event.preventDefault();
                 sendMessage(event);
               }
             }}
           />
-          <button type="submit" disabled={loading || !question.trim()} title="发送">
-            <SendHorizontal size={18} />
-            发送
-          </button>
+          <div className="composerActions">
+            <button
+              className={`thinkingButton ${enableThinking ? "thinkingButtonActive" : ""}`}
+              type="button"
+              disabled={loading}
+              onClick={() => setEnableThinking((current) => !current)}
+              title="切换深度思考"
+            >
+              <Brain size={16} />
+              深度思考
+            </button>
+            <button className="sendButton" type="submit" disabled={loading || !question.trim()} title="发送">
+              <SendHorizontal size={18} />
+              发送
+            </button>
+          </div>
         </form>
       </section>
 

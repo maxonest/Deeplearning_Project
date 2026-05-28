@@ -27,11 +27,10 @@ models/deepseek/*
 embeddings/faiss_index/*
 !embeddings/faiss_index/.gitkeep
 
-# Data artifacts
-data/raw/*
-data/processed/*
-!data/raw/.gitkeep
-!data/processed/.gitkeep
+# Data scratch files
+data/**/*.tmp
+data/**/*.cache
+data/**/.DS_Store
 
 # Logs and system files
 *.log

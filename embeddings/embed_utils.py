@@ -8,18 +8,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from utils.config import settings
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from utils.data_loader import read_corpus_files
 
 
 INDEX_FILE = "index.faiss"
 METADATA_FILE = "metadata.json"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_INDEX_DIR = PROJECT_ROOT / "embeddings" / "faiss_index"
+DEFAULT_PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
+DEFAULT_CHUNK_SIZE = 600
+DEFAULT_CHUNK_OVERLAP = 80
+DEFAULT_TOP_K = 5
 
 
 @dataclass(frozen=True)
@@ -56,7 +66,7 @@ def _load_sentence_transformer():
     return SentenceTransformer
 
 
-def chunk_text(text: str, chunk_size: int = settings.chunk_size, overlap: int = settings.chunk_overlap) -> list[str]:
+def chunk_text(text: str, chunk_size: int = DEFAULT_CHUNK_SIZE, overlap: int = DEFAULT_CHUNK_OVERLAP) -> list[str]:
     """Split text into overlapping character chunks."""
 
     if chunk_size <= 0:
@@ -86,8 +96,8 @@ class FaissKnowledgeBase:
 
     def __init__(
         self,
-        index_dir: str | Path = settings.faiss_index_dir,
-        embedding_model: str = settings.embedding_model,
+        index_dir: str | Path = DEFAULT_INDEX_DIR,
+        embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         batch_size: int = 32,
     ) -> None:
         self.index_dir = Path(index_dir)
@@ -162,7 +172,7 @@ class FaissKnowledgeBase:
         else:
             self._metadata = payload.get("chunks", [])
 
-    def search(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
+    def search(self, query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
         if not query.strip():
             return []
         if self._index is None or self._metadata is None:
@@ -189,17 +199,17 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_parser = subparsers.add_parser("build")
-    build_parser.add_argument("--input", default=str(settings.processed_data_dir))
-    build_parser.add_argument("--output", default=str(settings.faiss_index_dir))
-    build_parser.add_argument("--model", default=settings.embedding_model)
-    build_parser.add_argument("--chunk_size", type=int, default=settings.chunk_size)
-    build_parser.add_argument("--overlap", type=int, default=settings.chunk_overlap)
+    build_parser.add_argument("--input", default=str(DEFAULT_PROCESSED_DATA_DIR))
+    build_parser.add_argument("--output", default=str(DEFAULT_INDEX_DIR))
+    build_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    build_parser.add_argument("--chunk_size", type=int, default=DEFAULT_CHUNK_SIZE)
+    build_parser.add_argument("--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP)
 
     query_parser = subparsers.add_parser("query")
     query_parser.add_argument("query")
-    query_parser.add_argument("--index", default=str(settings.faiss_index_dir))
-    query_parser.add_argument("--model", default=settings.embedding_model)
-    query_parser.add_argument("--top_k", type=int, default=settings.default_top_k)
+    query_parser.add_argument("--index", default=str(DEFAULT_INDEX_DIR))
+    query_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    query_parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K)
 
     return parser.parse_args()
 

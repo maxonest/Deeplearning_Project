@@ -126,15 +126,22 @@ cd ..
 ./run.sh
 ```
 
-## 构建 FAISS 知识库
+## 语料整理与 FAISS 知识库
 
-把语料放入：
+推荐目录职责：
 
 ```text
-data/processed/
+data/raw/        # 原始长文本、手工收集资料
+data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数据
 ```
 
-支持 `.txt`、`.md`、`.csv`。
+当前项目支持把 `.txt/.md/.csv/.json/.jsonl` 放入 `data/processed` 参与建库。其中 JSON 问答数据会自动转成“来源/问题/答案”的可检索文本。
+
+如果你把原始文本放在 `data/raw`，先同步清洗到 `data/processed`：
+
+```bash
+python utils/prepare_corpus.py
+```
 
 构建索引：
 
@@ -149,6 +156,8 @@ python embeddings/embed_utils.py build \
 ```bash
 python embeddings/embed_utils.py query "你的问题" --top_k 5
 ```
+
+FAISS 索引会保存到 `embeddings/faiss_index`，构建完成后可以反复直接使用，不需要每次启动都重建。只有当你新增、删除或修改 `data/processed` 中的语料后，才需要重新运行 build 命令。
 
 ## 数据集格式
 

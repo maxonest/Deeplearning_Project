@@ -2,7 +2,13 @@ import json
 
 import pytest
 
-from utils.data_loader import format_sft_prompt, load_json_records, normalize_record, split_records
+from utils.data_loader import (
+    format_sft_prompt,
+    load_json_records,
+    normalize_record,
+    read_corpus_files,
+    split_records,
+)
 
 
 def test_load_json_records_accepts_array_and_normalizes(tmp_path):
@@ -48,3 +54,20 @@ def test_format_sft_prompt_contains_chatml_parts():
     assert "回答" in prompt
     assert "问题" in prompt
     assert "答案" in prompt
+
+
+def test_read_corpus_files_supports_json_dataset(tmp_path):
+    path = tmp_path / "dataset.json"
+    path.write_text(
+        json.dumps(
+            [{"input": "运动前要热身吗？", "output": "建议热身。", "metadata": {"source": "sample"}}],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    docs = read_corpus_files(path)
+
+    assert len(docs) == 1
+    assert "运动前要热身吗" in docs[0][1]
+    assert "建议热身" in docs[0][1]

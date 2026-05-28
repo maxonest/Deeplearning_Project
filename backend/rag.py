@@ -64,6 +64,37 @@ class RAGPipeline:
     def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
         return self.retriever.search(query, top_k=top_k)
 
+    @staticmethod
+    def is_small_talk(question: str) -> bool:
+        normalized = question.strip().lower().replace("！", "").replace("!", "").replace("。", "")
+        small_talk = {
+            "你好",
+            "您好",
+            "hello",
+            "hi",
+            "嗨",
+            "在吗",
+            "你是谁",
+            "介绍一下你自己",
+            "谢谢",
+            "thank you",
+            "thanks",
+        }
+        return normalized in small_talk or (len(normalized) <= 8 and any(word in normalized for word in small_talk))
+
+    def build_chat_prompt(self, question: str, memory_context: str = "") -> str:
+        memory = (memory_context or "暂无")[-max(1000, self.max_context_chars // 3) :]
+        return f"""你是一个专业、友好、简洁的本地领域知识问答助手。
+用户当前是在进行普通对话或寒暄时，请自然回应，不要提及知识库、检索结果或 RAG。
+如果用户随后提出专业问题，再结合本地知识库严谨回答。
+
+【多轮对话记忆】
+{memory}
+
+【用户消息】
+{question}
+"""
+
     def build_prompt(self, question: str, documents: list[dict[str, Any]], memory_context: str = "") -> str:
         context_blocks = []
         for index, document in enumerate(documents, start=1):
@@ -73,7 +104,7 @@ class RAGPipeline:
             score_text = f" | score={score:.4f}" if isinstance(score, float) else ""
             context_blocks.append(f"[文档 {index}] 来源: {source}{score_text}\n{text}")
 
-        retrieved_context = "\n\n".join(context_blocks) or "未检索到本地知识库内容。"
+        retrieved_context = "\n\n".join(context_blocks) or "暂无可引用的补充资料。"
         memory_budget = max(1000, self.max_context_chars // 3)
         retrieval_budget = max(1000, self.max_context_chars - memory_budget)
         memory = (memory_context or "暂无")[-memory_budget:]
@@ -104,8 +135,12 @@ class RAGPipeline:
         top_k: int = settings.default_top_k,
         enable_thinking: bool | None = None,
     ) -> dict[str, Any]:
-        documents = self.retrieve(question, top_k=top_k)
-        prompt = self.build_prompt(question, documents, memory_context=memory_context)
+        if self.is_small_talk(question):
+            documents: list[dict[str, Any]] = []
+            prompt = self.build_chat_prompt(question, memory_context=memory_context)
+        else:
+            documents = self.retrieve(question, top_k=top_k)
+            prompt = self.build_prompt(question, documents, memory_context=memory_context)
         answer = self.llm_client.generate(prompt, enable_thinking=enable_thinking)
         return {
             "answer": answer,
@@ -120,6 +155,10 @@ class RAGPipeline:
         top_k: int = settings.default_top_k,
         enable_thinking: bool | None = None,
     ) -> tuple[list[dict[str, Any]], Iterator[str]]:
-        documents = self.retrieve(question, top_k=top_k)
-        prompt = self.build_prompt(question, documents, memory_context=memory_context)
+        if self.is_small_talk(question):
+            documents: list[dict[str, Any]] = []
+            prompt = self.build_chat_prompt(question, memory_context=memory_context)
+        else:
+            documents = self.retrieve(question, top_k=top_k)
+            prompt = self.build_prompt(question, documents, memory_context=memory_context)
         return documents, self.llm_client.stream_generate(prompt, enable_thinking=enable_thinking)

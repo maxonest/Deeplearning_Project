@@ -111,6 +111,19 @@ def format_sft_prompt(record: dict[str, Any]) -> str:
     )
 
 
+def record_to_corpus_text(record: dict[str, Any]) -> str:
+    """Convert a QA/dataset record into searchable corpus text."""
+
+    normalized = normalize_record(record)
+    source = normalized.get("metadata", {}).get("source", "")
+    parts = [
+        f"来源: {source}" if source else "",
+        f"问题: {normalized['input']}",
+        f"答案: {normalized['output']}",
+    ]
+    return "\n".join(part for part in parts if part).strip()
+
+
 def read_corpus_files(input_path: str | Path) -> list[tuple[str, str]]:
     """Read text-like corpus files from a file or directory."""
 
@@ -118,11 +131,22 @@ def read_corpus_files(input_path: str | Path) -> list[tuple[str, str]]:
     files = [input_path] if input_path.is_file() else sorted(input_path.rglob("*"))
     docs: list[tuple[str, str]] = []
     for file_path in files:
-        if file_path.suffix.lower() not in {".txt", ".md", ".csv"}:
+        suffix = file_path.suffix.lower()
+        if suffix not in {".txt", ".md", ".csv", ".json", ".jsonl"}:
             continue
-        text = file_path.read_text(encoding="utf-8", errors="ignore").strip()
-        if text:
-            docs.append((str(file_path), text))
+        if suffix in {".json", ".jsonl"}:
+            try:
+                records = load_json_records(file_path)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            for index, record in enumerate(records):
+                text = record_to_corpus_text(record)
+                if text:
+                    docs.append((f"{file_path}#{index}", text))
+        else:
+            text = file_path.read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                docs.append((str(file_path), text))
     return docs
 
 

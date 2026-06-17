@@ -8,7 +8,7 @@
 - 知识库构建：读取 `txt/md/csv` 语料，切块后用 sentence-transformers 生成 embedding，并保存 FAISS 索引。
 - 本地 RAG：FastAPI 接收问题，管理多轮会话，检索 top-k 文档，拼接上下文后调用本地模型。
 - 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM。
-- 微调训练：基于 Transformers Trainer + PEFT 进行 LoRA/QLoRA SFT。
+- 微调训练：基于 PyTorch 自定义训练循环 + PEFT 进行 LoRA/QLoRA SFT，避免 Windows 环境中 `Trainer/datasets/pyarrow` 的兼容性问题。
 - 前端页面：React 18 + Vite 多轮对话 UI，支持 top-k 参数和召回来源展示。
 - 测试：覆盖数据处理、多轮记忆、RAG 提示词链路和 FastAPI 接口。
 

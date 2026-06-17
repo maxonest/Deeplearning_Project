@@ -7,17 +7,28 @@ of relying on TRL API details, making it easier to debug on Windows/Linux.
 from __future__ import annotations
 
 import argparse
+import faulthandler
+import os
 import sys
 import traceback
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+
+os.environ.setdefault("PYTHONFAULTHANDLER", "1")
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+os.environ.setdefault("TORCH_SHOW_CPP_STACKTRACES", "1")
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.data_loader import load_json_records, split_records  # noqa: E402
+
+
+LOG_DIR = PROJECT_ROOT / "logs"
+DEBUG_LOG_PATH = LOG_DIR / "train_lora_debug.log"
 
 
 TRAINING_DEFAULTS = {
@@ -51,6 +62,21 @@ TRAINING_DEFAULTS = {
     "swanlab_project": "local-domain-qa-lora",
     "swanlab_run_name": "qwen3.5-9b-lora",
 }
+
+
+def log_stage(message: str) -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    line = f"[{datetime.now().isoformat(timespec='seconds')}] {message}"
+    print(line, flush=True)
+    with DEBUG_LOG_PATH.open("a", encoding="utf-8") as file:
+        file.write(line + "\n")
+
+
+def enable_fault_diagnostics() -> None:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    faulthandler.enable(file=sys.stderr, all_threads=True)
+    log_stage("Fault diagnostics enabled on terminal stderr.")
+    log_stage("Native debug env: CUDA_LAUNCH_BLOCKING=1, TORCH_SHOW_CPP_STACKTRACES=1.")
 
 
 def parse_target_modules(value: str) -> list[str]:
@@ -112,6 +138,7 @@ def preview_dataset(records: list[dict[str, Any]], tokenizer, max_length: int) -
 
 
 def build_training_arguments(args: argparse.Namespace, has_eval_dataset: bool):
+    log_stage("Building TrainingArguments.")
     from transformers import TrainingArguments
 
     kwargs = dict(
@@ -143,11 +170,14 @@ def build_training_arguments(args: argparse.Namespace, has_eval_dataset: bool):
 
 
 def build_model(args: argparse.Namespace):
+    log_stage("Importing torch and Transformers model classes.")
     import torch
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
+    log_stage("Model class imports finished.")
     quantization_config = None
     if args.use_qlora:
+        log_stage("Building QLoRA BitsAndBytesConfig.")
         quantization_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
@@ -155,7 +185,8 @@ def build_model(args: argparse.Namespace):
             bnb_4bit_use_double_quant=True,
         )
 
-    return AutoModelForCausalLM.from_pretrained(
+    log_stage(f"Loading base model from: {Path(args.model_name_or_path).resolve()}")
+    model = AutoModelForCausalLM.from_pretrained(
         args.model_name_or_path,
         dtype=torch.bfloat16 if torch.cuda.is_available() else torch.float32,
         device_map="auto" if torch.cuda.is_available() else None,
@@ -163,9 +194,12 @@ def build_model(args: argparse.Namespace):
         local_files_only=args.local_files_only,
         quantization_config=quantization_config,
     )
+    log_stage("Base model loaded successfully.")
+    return model
 
 
 def validate_training_environment(args: argparse.Namespace) -> None:
+    log_stage("Validating training environment.")
     import torch
 
     if args.bf16 and args.fp16:
@@ -189,7 +223,7 @@ def validate_training_environment(args: argparse.Namespace) -> None:
 
     device_name = torch.cuda.get_device_name(0)
     total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
-    print(f"CUDA ready: {device_name}, total_memory={total_gb:.2f}G", flush=True)
+    log_stage(f"CUDA ready: {device_name}, total_memory={total_gb:.2f}G")
 
     if args.bf16 and not torch.cuda.is_bf16_supported():
         raise RuntimeError("bf16 is not supported by this GPU/PyTorch build. Try: python models/train_lora.py --no_bf16 --fp16")
@@ -205,6 +239,7 @@ def validate_training_environment(args: argparse.Namespace) -> None:
 
 
 def build_monitoring_callbacks(args: argparse.Namespace):
+    log_stage("Building monitoring callbacks.")
     from transformers import TrainerCallback
 
     class ConsoleProgressCallback(TrainerCallback):
@@ -273,24 +308,27 @@ def build_monitoring_callbacks(args: argparse.Namespace):
 
 
 def train(args: argparse.Namespace) -> None:
+    log_stage("Importing tokenizer.")
     from transformers import AutoTokenizer
 
     print("Effective training config:")
     for key, value in vars(args).items():
-        print(f"  {key}: {value}")
+        print(f"  {key}: {value}", flush=True)
 
+    log_stage("Loading JSON records.")
     records = load_json_records(args.dataset_path)
     if args.max_samples:
         records = records[: args.max_samples]
-    print(f"Loaded records: {len(records)} from {args.dataset_path}", flush=True)
+    log_stage(f"Loaded records: {len(records)} from {args.dataset_path}")
+    log_stage("Splitting dataset.")
     splits = split_records(records, train_ratio=args.train_ratio, val_ratio=args.val_ratio, seed=args.seed)
-    print(
+    log_stage(
         f"Dataset split: train={len(splits['train'])}, validation={len(splits['validation'])}, test={len(splits['test'])}",
-        flush=True,
     )
     if not splits["train"]:
         raise RuntimeError("No training records found.")
 
+    log_stage("Loading tokenizer.")
     tokenizer = AutoTokenizer.from_pretrained(
         args.model_name_or_path,
         trust_remote_code=True,
@@ -300,6 +338,7 @@ def train(args: argparse.Namespace) -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
+    log_stage("Tokenizer loaded successfully.")
 
     preview_dataset(splits["train"], tokenizer, args.max_seq_length)
     if args.dry_run:
@@ -308,15 +347,20 @@ def train(args: argparse.Namespace) -> None:
 
     validate_training_environment(args)
 
+    log_stage("Importing PEFT and Trainer classes.")
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     from transformers import DataCollatorForSeq2Seq, Trainer
+    log_stage("PEFT and Trainer imports finished.")
 
     model = build_model(args)
     if args.gradient_checkpointing and hasattr(model, "config"):
+        log_stage("Disabling model.config.use_cache for gradient checkpointing.")
         model.config.use_cache = False
     if args.use_qlora:
+        log_stage("Preparing model for k-bit training.")
         model = prepare_model_for_kbit_training(model)
 
+    log_stage("Applying LoRA adapter.")
     lora_config = LoraConfig(
         task_type=TaskType.CAUSAL_LM,
         r=args.lora_r,
@@ -327,8 +371,11 @@ def train(args: argparse.Namespace) -> None:
     )
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
+    log_stage("LoRA adapter applied.")
 
+    log_stage("Tokenizing train dataset.")
     train_dataset = build_tokenized_dataset(splits["train"], tokenizer, args.max_seq_length)
+    log_stage("Tokenizing validation dataset.")
     eval_dataset = (
         build_tokenized_dataset(splits["validation"], tokenizer, args.max_seq_length)
         if splits["validation"]
@@ -343,8 +390,8 @@ def train(args: argparse.Namespace) -> None:
         / max(1, args.per_device_train_batch_size)
         / max(1, args.gradient_accumulation_steps)
     )
-    print(f"Tokenized train samples: {len(train_dataset)}", flush=True)
-    print(f"Estimated optimizer steps: {estimated_steps:.1f}", flush=True)
+    log_stage(f"Tokenized train samples: {len(train_dataset)}")
+    log_stage(f"Estimated optimizer steps: {estimated_steps:.1f}")
     if estimated_steps < 1:
         raise RuntimeError(
             "Estimated optimizer steps is less than 1. "
@@ -354,6 +401,7 @@ def train(args: argparse.Namespace) -> None:
     training_args = build_training_arguments(args, has_eval_dataset=eval_dataset is not None)
     callbacks = build_monitoring_callbacks(args)
 
+    log_stage("Initializing Trainer.")
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -362,21 +410,22 @@ def train(args: argparse.Namespace) -> None:
         data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
         callbacks=callbacks,
     )
-    print("Training started.", flush=True)
+    log_stage("Training started.")
     train_result = trainer.train()
     if trainer.state.global_step <= 0:
         raise RuntimeError(
             "Training finished with global_step=0. No optimizer step was executed. "
             "Check dataset size, epochs, batch size, and gradient_accumulation_steps."
         )
-    print(f"Training finished: global_step={trainer.state.global_step}", flush=True)
-    print(f"Training metrics: {train_result.metrics}", flush=True)
+    log_stage(f"Training finished: global_step={trainer.state.global_step}")
+    log_stage(f"Training metrics: {train_result.metrics}")
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_stage("Saving LoRA adapter and tokenizer.")
     trainer.model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
-    print(f"LoRA adapter saved to: {output_dir.resolve()}", flush=True)
+    log_stage(f"LoRA adapter saved to: {output_dir.resolve()}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -449,8 +498,20 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     try:
+        try:
+            sys.stdout.reconfigure(line_buffering=True)
+            sys.stderr.reconfigure(line_buffering=True)
+        except AttributeError:
+            pass
+        enable_fault_diagnostics()
+        log_stage("Training process started.")
         train(parse_args())
+        log_stage("Training process exited normally.")
     except Exception:
+        error_text = traceback.format_exc()
+        log_stage("Training failed with an explicit Python exception.")
+        with DEBUG_LOG_PATH.open("a", encoding="utf-8") as file:
+            file.write("\n" + error_text + "\n")
         print("\nTraining failed with an explicit error:\n", file=sys.stderr)
-        traceback.print_exc()
+        print(error_text, file=sys.stderr)
         sys.exit(1)

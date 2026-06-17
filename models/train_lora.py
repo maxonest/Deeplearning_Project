@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,7 @@ TRAINING_DEFAULTS = {
     "gradient_checkpointing": True,
     "bf16": True,
     "fp16": False,
+    "require_cuda": True,
     "use_swanlab": True,
     "swanlab_project": "local-domain-qa-lora",
     "swanlab_run_name": "qwen3.5-9b-lora",
@@ -163,6 +165,45 @@ def build_model(args: argparse.Namespace):
     )
 
 
+def validate_training_environment(args: argparse.Namespace) -> None:
+    import torch
+
+    if args.bf16 and args.fp16:
+        raise RuntimeError("bf16 and fp16 cannot be enabled at the same time. Use --no_bf16 --fp16 for fp16.")
+
+    if not Path(args.model_name_or_path).exists():
+        raise FileNotFoundError(f"Model path does not exist: {Path(args.model_name_or_path).resolve()}")
+
+    if not Path(args.dataset_path).exists():
+        raise FileNotFoundError(f"Dataset path does not exist: {Path(args.dataset_path).resolve()}")
+
+    if not torch.cuda.is_available():
+        message = (
+            "CUDA is not available in this Python environment. "
+            "Check that you activated the right conda env and installed the CUDA build of PyTorch."
+        )
+        if args.require_cuda:
+            raise RuntimeError(message + " To force CPU training, pass --allow_cpu.")
+        print("WARNING: " + message, flush=True)
+        return
+
+    device_name = torch.cuda.get_device_name(0)
+    total_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
+    print(f"CUDA ready: {device_name}, total_memory={total_gb:.2f}G", flush=True)
+
+    if args.bf16 and not torch.cuda.is_bf16_supported():
+        raise RuntimeError("bf16 is not supported by this GPU/PyTorch build. Try: python models/train_lora.py --no_bf16 --fp16")
+
+    if args.use_qlora:
+        try:
+            import bitsandbytes  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "QLoRA requires bitsandbytes, but it is not installed. "
+                "Use LoRA without --use_qlora first, or install a Windows-compatible bitsandbytes build."
+            ) from exc
+
+
 def build_monitoring_callbacks(args: argparse.Namespace):
     from transformers import TrainerCallback
 
@@ -241,7 +282,12 @@ def train(args: argparse.Namespace) -> None:
     records = load_json_records(args.dataset_path)
     if args.max_samples:
         records = records[: args.max_samples]
+    print(f"Loaded records: {len(records)} from {args.dataset_path}", flush=True)
     splits = split_records(records, train_ratio=args.train_ratio, val_ratio=args.val_ratio, seed=args.seed)
+    print(
+        f"Dataset split: train={len(splits['train'])}, validation={len(splits['validation'])}, test={len(splits['test'])}",
+        flush=True,
+    )
     if not splits["train"]:
         raise RuntimeError("No training records found.")
 
@@ -259,6 +305,8 @@ def train(args: argparse.Namespace) -> None:
     if args.dry_run:
         print("Dry run finished. No training started.")
         return
+
+    validate_training_environment(args)
 
     from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
     from transformers import DataCollatorForSeq2Seq, Trainer
@@ -286,6 +334,22 @@ def train(args: argparse.Namespace) -> None:
         if splits["validation"]
         else None
     )
+    if len(train_dataset) == 0:
+        raise RuntimeError("Tokenized train dataset is empty. Check dataset_path and max_seq_length.")
+
+    estimated_steps = (
+        len(train_dataset)
+        * args.epochs
+        / max(1, args.per_device_train_batch_size)
+        / max(1, args.gradient_accumulation_steps)
+    )
+    print(f"Tokenized train samples: {len(train_dataset)}", flush=True)
+    print(f"Estimated optimizer steps: {estimated_steps:.1f}", flush=True)
+    if estimated_steps < 1:
+        raise RuntimeError(
+            "Estimated optimizer steps is less than 1. "
+            "Increase epochs/max_samples or reduce gradient_accumulation_steps."
+        )
 
     training_args = build_training_arguments(args, has_eval_dataset=eval_dataset is not None)
     callbacks = build_monitoring_callbacks(args)
@@ -298,12 +362,21 @@ def train(args: argparse.Namespace) -> None:
         data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
         callbacks=callbacks,
     )
-    trainer.train()
+    print("Training started.", flush=True)
+    train_result = trainer.train()
+    if trainer.state.global_step <= 0:
+        raise RuntimeError(
+            "Training finished with global_step=0. No optimizer step was executed. "
+            "Check dataset size, epochs, batch size, and gradient_accumulation_steps."
+        )
+    print(f"Training finished: global_step={trainer.state.global_step}", flush=True)
+    print(f"Training metrics: {train_result.metrics}", flush=True)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     trainer.model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
+    print(f"LoRA adapter saved to: {output_dir.resolve()}", flush=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -355,6 +428,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no_bf16", dest="bf16", action="store_false", default=TRAINING_DEFAULTS["bf16"])
     parser.add_argument("--fp16", action="store_true", default=TRAINING_DEFAULTS["fp16"])
     parser.add_argument(
+        "--allow_cpu",
+        dest="require_cuda",
+        action="store_false",
+        default=TRAINING_DEFAULTS["require_cuda"],
+        help="Allow training to continue without CUDA. This is only useful for tiny debugging runs.",
+    )
+    parser.add_argument(
         "--no_swanlab",
         dest="use_swanlab",
         action="store_false",
@@ -368,4 +448,9 @@ def parse_args() -> argparse.Namespace:
 
 
 if __name__ == "__main__":
-    train(parse_args())
+    try:
+        train(parse_args())
+    except Exception:
+        print("\nTraining failed with an explicit error:\n", file=sys.stderr)
+        traceback.print_exc()
+        sys.exit(1)

@@ -182,27 +182,56 @@ python utils/data_loader.py --input data/dataset.json --output_dir data
 
 ## LoRA/QLoRA 微调
 
-LoRA：
+安装训练依赖后，先登录 SwanLab 以便在浏览器里实时查看 loss、learning rate、训练步数等曲线：
 
-```bash
-python models/train_lora.py \
-  --model_name_or_path models/qwen/Qwen3.5-9B \
-  --dataset_path data/dataset.json \
-  --output_dir models/qwen/lora_adapter \
-  --local_files_only \
-  --bf16
+```powershell
+python -m pip install swanlab
+swanlab login
+```
+
+当前训练参数已经写入 `models/train_lora.py`，默认使用：
+
+- 模型：`models/qwen/Qwen3.5-9B`
+- 数据：`data/finetune/sft_dataset_clean.json`
+- 输出：`models/qwen/lora_adapter`
+- LoRA：`r=16, alpha=32, dropout=0.05`
+- 训练：`epochs=1, max_seq_length=1024, batch_size=1, gradient_accumulation_steps=8, bf16=True`
+- 监控：默认启用 SwanLab，同时在控制台打印 step、loss、learning rate 和显存
+
+正式训练前建议先预览数据和 prompt：
+
+```powershell
+python models/train_lora.py --dry_run --max_samples 3
+```
+
+开始 LoRA 微调：
+
+```powershell
+python models/train_lora.py
+```
+
+禁用 SwanLab，仅保留控制台进度：
+
+```powershell
+python models/train_lora.py --no_swanlab
+```
+
+自定义 SwanLab 项目名和实验名：
+
+```powershell
+python models/train_lora.py --swanlab_project local-domain-qa --swanlab_run_name qwen3.5-9b-run01
+```
+
+如果 `bf16` 报错，可以改用：
+
+```powershell
+python models/train_lora.py --no_bf16 --fp16
 ```
 
 QLoRA：
 
-```bash
-python models/train_lora.py \
-  --model_name_or_path models/qwen/Qwen3.5-9B \
-  --dataset_path data/dataset.json \
-  --output_dir models/qwen/qlora_adapter \
-  --local_files_only \
-  --use_qlora \
-  --bf16
+```powershell
+python models/train_lora.py --use_qlora
 ```
 
 Windows 上 QLoRA 依赖 `bitsandbytes`，如果安装困难，优先使用 LoRA 或在 Linux/CUDA 环境训练。

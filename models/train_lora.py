@@ -45,6 +45,9 @@ TRAINING_DEFAULTS = {
     "gradient_checkpointing": True,
     "bf16": True,
     "fp16": False,
+    "use_swanlab": True,
+    "swanlab_project": "local-domain-qa-lora",
+    "swanlab_run_name": "qwen3.5-9b-lora",
 }
 
 
@@ -111,11 +114,13 @@ def build_training_arguments(args: argparse.Namespace, has_eval_dataset: bool):
 
     kwargs = dict(
         output_dir=args.output_dir,
+        run_name=args.swanlab_run_name,
         num_train_epochs=args.epochs,
         learning_rate=args.learning_rate,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        logging_strategy="steps",
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         eval_steps=args.eval_steps,
@@ -126,6 +131,7 @@ def build_training_arguments(args: argparse.Namespace, has_eval_dataset: bool):
         gradient_checkpointing=args.gradient_checkpointing,
         optim="paged_adamw_8bit" if args.use_qlora else "adamw_torch",
         dataloader_num_workers=0,
+        disable_tqdm=False,
     )
     strategy = "steps" if has_eval_dataset else "no"
     try:
@@ -155,6 +161,74 @@ def build_model(args: argparse.Namespace):
         local_files_only=args.local_files_only,
         quantization_config=quantization_config,
     )
+
+
+def build_monitoring_callbacks(args: argparse.Namespace):
+    from transformers import TrainerCallback
+
+    class ConsoleProgressCallback(TrainerCallback):
+        def on_log(self, training_args, state, control, logs=None, **kwargs):
+            if not state.is_local_process_zero or not logs:
+                return
+
+            parts = [f"step={state.global_step}/{state.max_steps}"]
+            for key in ("loss", "eval_loss", "learning_rate", "grad_norm"):
+                if key in logs:
+                    value = logs[key]
+                    parts.append(f"{key}={value:.6g}" if isinstance(value, float) else f"{key}={value}")
+
+            try:
+                import torch
+
+                if torch.cuda.is_available():
+                    used_gb = torch.cuda.memory_allocated() / 1024**3
+                    reserved_gb = torch.cuda.memory_reserved() / 1024**3
+                    parts.append(f"cuda_mem={used_gb:.2f}G/{reserved_gb:.2f}G")
+            except Exception:
+                pass
+
+            print("[train] " + " | ".join(parts), flush=True)
+
+    callbacks = [ConsoleProgressCallback()]
+    if not args.use_swanlab:
+        return callbacks
+
+    try:
+        import swanlab
+        from swanlab.integration.transformers import SwanLabCallback
+    except ImportError:
+        print(
+            "SwanLab is not installed. Install it with: python -m pip install swanlab. "
+            "Training will continue with console progress only.",
+            flush=True,
+        )
+        return callbacks
+
+    config = vars(args).copy()
+    try:
+        callbacks.append(
+            SwanLabCallback(
+                project=args.swanlab_project,
+                experiment_name=args.swanlab_run_name,
+                config=config,
+            )
+        )
+        print(f"SwanLab enabled: project={args.swanlab_project}, run={args.swanlab_run_name}", flush=True)
+    except TypeError:
+        try:
+            swanlab.init(
+                project=args.swanlab_project,
+                experiment_name=args.swanlab_run_name,
+                config=config,
+            )
+            callbacks.append(SwanLabCallback())
+            print(f"SwanLab enabled: project={args.swanlab_project}, run={args.swanlab_run_name}", flush=True)
+        except Exception as exc:
+            print(f"SwanLab initialization failed: {exc}. Training will continue with console progress only.")
+    except Exception as exc:
+        print(f"SwanLab initialization failed: {exc}. Training will continue with console progress only.")
+
+    return callbacks
 
 
 def train(args: argparse.Namespace) -> None:
@@ -214,6 +288,7 @@ def train(args: argparse.Namespace) -> None:
     )
 
     training_args = build_training_arguments(args, has_eval_dataset=eval_dataset is not None)
+    callbacks = build_monitoring_callbacks(args)
 
     trainer = Trainer(
         model=model,
@@ -221,6 +296,7 @@ def train(args: argparse.Namespace) -> None:
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
+        callbacks=callbacks,
     )
     trainer.train()
 
@@ -278,6 +354,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--no_bf16", dest="bf16", action="store_false", default=TRAINING_DEFAULTS["bf16"])
     parser.add_argument("--fp16", action="store_true", default=TRAINING_DEFAULTS["fp16"])
+    parser.add_argument(
+        "--no_swanlab",
+        dest="use_swanlab",
+        action="store_false",
+        default=TRAINING_DEFAULTS["use_swanlab"],
+        help="Disable SwanLab experiment tracking.",
+    )
+    parser.add_argument("--swanlab_project", default=TRAINING_DEFAULTS["swanlab_project"])
+    parser.add_argument("--swanlab_run_name", default=TRAINING_DEFAULTS["swanlab_run_name"])
     parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 

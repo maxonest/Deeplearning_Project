@@ -38,8 +38,10 @@ TRAINING_DEFAULTS = {
     "local_files_only": True,
     "epochs": 1.0,
     "learning_rate": 2e-4,
+    "warmup_ratio": 0.03,
     "per_device_train_batch_size": 1,
     "gradient_accumulation_steps": 8,
+    "max_grad_norm": 1.0,
     "max_seq_length": 1024,
     "train_ratio": 0.9,
     "val_ratio": 0.1,
@@ -91,22 +93,56 @@ def format_prompt_parts(record: dict[str, Any]) -> tuple[str, str]:
     return prompt, answer
 
 
+def record_to_messages(record: dict[str, Any], include_answer: bool) -> list[dict[str, str]]:
+    instruction = record["instruction"].strip()
+    user_input = record["input"].strip()
+    output = record["output"].strip()
+    user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
+    messages = [
+        {"role": "system", "content": "你是一个专业、严谨的运动健康领域问答助手。"},
+        {"role": "user", "content": user_content},
+    ]
+    if include_answer:
+        messages.append({"role": "assistant", "content": output})
+    return messages
+
+
+def encode_record(record: dict[str, Any], tokenizer, max_length: int) -> dict[str, list[int]]:
+    if getattr(tokenizer, "chat_template", None):
+        prompt_ids = tokenizer.apply_chat_template(
+            record_to_messages(record, include_answer=False),
+            tokenize=True,
+            add_generation_prompt=True,
+        )
+        full_ids = tokenizer.apply_chat_template(
+            record_to_messages(record, include_answer=True),
+            tokenize=True,
+            add_generation_prompt=False,
+        )
+    else:
+        prompt, answer = format_prompt_parts(record)
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        full_ids = prompt_ids + tokenizer(answer, add_special_tokens=False)["input_ids"]
+
+    if len(full_ids) <= len(prompt_ids):
+        prompt, answer = format_prompt_parts(record)
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        full_ids = prompt_ids + tokenizer(answer, add_special_tokens=False)["input_ids"]
+
+    input_ids = full_ids[:max_length]
+    prompt_length = min(len(prompt_ids), len(input_ids))
+    labels = [-100] * prompt_length + input_ids[prompt_length:]
+    return {
+        "input_ids": input_ids,
+        "attention_mask": [1] * len(input_ids),
+        "labels": labels[: len(input_ids)],
+    }
+
+
 def tokenize_records(records: list[dict[str, Any]], tokenizer, max_length: int) -> list[dict[str, list[int]]]:
     tokenized_records = []
     for record in records:
-        prompt, answer = format_prompt_parts(record)
-        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
-        answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
-        input_ids = (prompt_ids + answer_ids)[:max_length]
-        labels = [-100] * min(len(prompt_ids), len(input_ids))
-        labels += input_ids[len(labels) :]
-        tokenized_records.append(
-            {
-                "input_ids": input_ids,
-                "attention_mask": [1] * len(input_ids),
-                "labels": labels[: len(input_ids)],
-            }
-        )
+        tokenized_records.append(encode_record(record, tokenizer, max_length))
     return tokenized_records
 
 
@@ -131,13 +167,17 @@ def collate_batch(features: list[dict[str, list[int]]], pad_token_id: int):
 def preview_dataset(records: list[dict[str, Any]], tokenizer, max_length: int) -> None:
     if not records:
         return
-    prompt, answer = format_prompt_parts(records[0])
-    tokenized = tokenizer(prompt + answer, truncation=True, max_length=max_length, add_special_tokens=False)
+    tokenized = encode_record(records[0], tokenizer, max_length)
+    trainable_tokens = sum(1 for label in tokenized["labels"] if label != -100)
+    preview_text = tokenizer.decode(tokenized["input_ids"][:max_length], skip_special_tokens=False)
     print("=" * 80)
     print("Dataset preview")
     print("=" * 80)
-    print((prompt + answer)[:1200])
-    print(f"tokens: {len(tokenized['input_ids'])}, max_seq_length: {max_length}")
+    print(preview_text[:1200])
+    print(
+        f"tokens: {len(tokenized['input_ids'])}, "
+        f"trainable_tokens: {trainable_tokens}, max_seq_length: {max_length}"
+    )
     print("=" * 80)
 
 
@@ -344,25 +384,41 @@ def train(args: argparse.Namespace) -> None:
 
     trainable_params = [parameter for parameter in model.parameters() if parameter.requires_grad]
     optimizer = torch.optim.AdamW(trainable_params, lr=args.learning_rate)
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
+    warmup_steps = int(total_steps * args.warmup_ratio)
+    scheduler = get_linear_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps,
+    )
     swanlab = init_swanlab(args)
     device = get_primary_device(model)
 
     global_step = 0
     running_loss = 0.0
+    running_loss_count = 0
     optimizer.zero_grad(set_to_none=True)
-    info("Training loop started.")
+    info(f"Training loop started. warmup_steps={warmup_steps}")
 
     for epoch in range(math.ceil(args.epochs)):
         for batch_index, batch in enumerate(train_loader, start=1):
             batch = move_batch_to_device(batch, device)
             outputs = model(**batch)
-            loss = outputs.loss / args.gradient_accumulation_steps
+            raw_loss = outputs.loss
+            loss = raw_loss / args.gradient_accumulation_steps
             loss.backward()
-            running_loss += loss.detach().float().item()
+            running_loss += raw_loss.detach().float().item()
+            running_loss_count += 1
 
             if batch_index % args.gradient_accumulation_steps != 0 and batch_index != len(train_loader):
                 continue
+
+            grad_norm = torch.nn.utils.clip_grad_norm_(trainable_params, args.max_grad_norm)
+            grad_norm_value = float(grad_norm.detach().float().item())
+            if global_step == 0 and (not math.isfinite(grad_norm_value) or grad_norm_value == 0.0):
+                raise RuntimeError(
+                    f"Invalid LoRA gradient norm at first optimizer step: {grad_norm_value}. "
+                    "The adapter may not be connected to the loss."
+                )
 
             optimizer.step()
             scheduler.step()
@@ -370,16 +426,27 @@ def train(args: argparse.Namespace) -> None:
             global_step += 1
 
             if global_step % args.logging_steps == 0 or global_step == 1:
-                current_loss = running_loss
+                current_loss = running_loss / max(1, running_loss_count)
                 running_loss = 0.0
+                running_loss_count = 0
                 lr = scheduler.get_last_lr()[0]
-                message = f"step {global_step}/{total_steps} | loss={current_loss:.4f} | lr={lr:.3e}"
+                message = (
+                    f"step {global_step}/{total_steps} | loss={current_loss:.4f} "
+                    f"| lr={lr:.3e} | grad_norm={grad_norm_value:.4f}"
+                )
                 if torch.cuda.is_available():
                     used_gb = torch.cuda.memory_allocated() / 1024**3
                     message += f" | cuda_mem={used_gb:.2f}G"
                 info(message)
                 if swanlab is not None:
-                    swanlab.log({"train/loss": current_loss, "train/lr": lr}, step=global_step)
+                    swanlab.log(
+                        {
+                            "train/loss": current_loss,
+                            "train/lr": lr,
+                            "train/grad_norm": grad_norm_value,
+                        },
+                        step=global_step,
+                    )
 
             if eval_loader is not None and global_step % args.eval_steps == 0:
                 eval_loss = evaluate(model, eval_loader, device)
@@ -426,8 +493,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--use_qlora", action="store_true")
     parser.add_argument("--epochs", type=float, default=TRAINING_DEFAULTS["epochs"])
     parser.add_argument("--learning_rate", type=float, default=TRAINING_DEFAULTS["learning_rate"])
+    parser.add_argument("--warmup_ratio", type=float, default=TRAINING_DEFAULTS["warmup_ratio"])
     parser.add_argument("--per_device_train_batch_size", type=int, default=TRAINING_DEFAULTS["per_device_train_batch_size"])
     parser.add_argument("--gradient_accumulation_steps", type=int, default=TRAINING_DEFAULTS["gradient_accumulation_steps"])
+    parser.add_argument("--max_grad_norm", type=float, default=TRAINING_DEFAULTS["max_grad_norm"])
     parser.add_argument("--max_seq_length", type=int, default=TRAINING_DEFAULTS["max_seq_length"])
     parser.add_argument("--max_samples", type=int, default=0, help="Use first N samples for smoke testing.")
     parser.add_argument("--train_ratio", type=float, default=TRAINING_DEFAULTS["train_ratio"])

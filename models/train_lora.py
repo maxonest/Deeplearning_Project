@@ -16,11 +16,54 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.data_loader import format_sft_prompt, load_json_records, split_records  # noqa: E402
+from utils.data_loader import load_json_records, split_records  # noqa: E402
+
+
+TRAINING_DEFAULTS = {
+    # Windows deployment default:
+    # D:/lyx/Deeplearning_Project/models/qwen/Qwen3.5-9B
+    "model_name_or_path": "models/qwen/Qwen3.5-9B",
+    "dataset_path": "data/finetune/sft_dataset_clean.json",
+    "output_dir": "models/qwen/lora_adapter",
+    "local_files_only": True,
+    # Conservative LoRA defaults for a single RTX 4090/4090D.
+    "epochs": 1.0,
+    "learning_rate": 2e-4,
+    "per_device_train_batch_size": 1,
+    "gradient_accumulation_steps": 8,
+    "max_seq_length": 1024,
+    "train_ratio": 0.9,
+    "val_ratio": 0.1,
+    "seed": 42,
+    "lora_r": 16,
+    "lora_alpha": 32,
+    "lora_dropout": 0.05,
+    "target_modules": "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+    "logging_steps": 10,
+    "save_steps": 200,
+    "eval_steps": 200,
+    "gradient_checkpointing": True,
+    "bf16": True,
+    "fp16": False,
+}
 
 
 def parse_target_modules(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def format_prompt_parts(record: dict[str, Any]) -> tuple[str, str]:
+    instruction = record["instruction"].strip()
+    user_input = record["input"].strip()
+    output = record["output"].strip()
+    user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
+    prompt = (
+        "<|im_start|>system\n你是一个专业、严谨的运动健康领域问答助手。<|im_end|>\n"
+        f"<|im_start|>user\n{user_content}<|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+    answer = f"{output}<|im_end|>"
+    return prompt, answer
 
 
 def build_tokenized_dataset(records: list[dict[str, Any]], tokenizer, max_length: int):
@@ -29,17 +72,66 @@ def build_tokenized_dataset(records: list[dict[str, Any]], tokenizer, max_length
     dataset = Dataset.from_list(records)
 
     def tokenize(example: dict[str, Any]) -> dict[str, Any]:
-        text = format_sft_prompt(example)
-        tokenized = tokenizer(
-            text,
-            truncation=True,
-            max_length=max_length,
-            padding=False,
-        )
-        tokenized["labels"] = tokenized["input_ids"].copy()
-        return tokenized
+        prompt, answer = format_prompt_parts(example)
+        prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(answer, add_special_tokens=False)["input_ids"]
+        input_ids = (prompt_ids + answer_ids)[:max_length]
+        labels = [-100] * min(len(prompt_ids), len(input_ids))
+        labels += input_ids[len(labels) :]
+        attention_mask = [1] * len(input_ids)
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "labels": labels[: len(input_ids)],
+        }
 
     return dataset.map(tokenize, remove_columns=dataset.column_names)
+
+
+def preview_dataset(records: list[dict[str, Any]], tokenizer, max_length: int) -> None:
+    if not records:
+        return
+    prompt, answer = format_prompt_parts(records[0])
+    tokenized = tokenizer(
+        prompt + answer,
+        truncation=True,
+        max_length=max_length,
+        add_special_tokens=False,
+    )
+    print("=" * 80)
+    print("Dataset preview")
+    print("=" * 80)
+    print((prompt + answer)[:1200])
+    print(f"tokens: {len(tokenized['input_ids'])}, max_seq_length: {max_length}")
+    print("=" * 80)
+
+
+def build_training_arguments(args: argparse.Namespace, has_eval_dataset: bool):
+    from transformers import TrainingArguments
+
+    kwargs = dict(
+        output_dir=args.output_dir,
+        num_train_epochs=args.epochs,
+        learning_rate=args.learning_rate,
+        per_device_train_batch_size=args.per_device_train_batch_size,
+        per_device_eval_batch_size=1,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        logging_steps=args.logging_steps,
+        save_steps=args.save_steps,
+        eval_steps=args.eval_steps,
+        save_total_limit=2,
+        bf16=args.bf16,
+        fp16=args.fp16,
+        report_to="none",
+        gradient_checkpointing=args.gradient_checkpointing,
+        optim="paged_adamw_8bit" if args.use_qlora else "adamw_torch",
+        dataloader_num_workers=0,
+    )
+    strategy = "steps" if has_eval_dataset else "no"
+    try:
+        return TrainingArguments(eval_strategy=strategy, **kwargs)
+    except TypeError:
+        return TrainingArguments(evaluation_strategy=strategy, **kwargs)
 
 
 def build_model(args: argparse.Namespace):
@@ -66,10 +158,15 @@ def build_model(args: argparse.Namespace):
 
 
 def train(args: argparse.Namespace) -> None:
-    from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
-    from transformers import AutoTokenizer, DataCollatorForLanguageModeling, Trainer, TrainingArguments
+    from transformers import AutoTokenizer
+
+    print("Effective training config:")
+    for key, value in vars(args).items():
+        print(f"  {key}: {value}")
 
     records = load_json_records(args.dataset_path)
+    if args.max_samples:
+        records = records[: args.max_samples]
     splits = split_records(records, train_ratio=args.train_ratio, val_ratio=args.val_ratio, seed=args.seed)
     if not splits["train"]:
         raise RuntimeError("No training records found.")
@@ -82,8 +179,19 @@ def train(args: argparse.Namespace) -> None:
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "right"
+
+    preview_dataset(splits["train"], tokenizer, args.max_seq_length)
+    if args.dry_run:
+        print("Dry run finished. No training started.")
+        return
+
+    from peft import LoraConfig, TaskType, get_peft_model, prepare_model_for_kbit_training
+    from transformers import DataCollatorForSeq2Seq, Trainer
 
     model = build_model(args)
+    if args.gradient_checkpointing and hasattr(model, "config"):
+        model.config.use_cache = False
     if args.use_qlora:
         model = prepare_model_for_kbit_training(model)
 
@@ -105,31 +213,14 @@ def train(args: argparse.Namespace) -> None:
         else None
     )
 
-    training_args = TrainingArguments(
-        output_dir=args.output_dir,
-        num_train_epochs=args.epochs,
-        learning_rate=args.learning_rate,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        logging_steps=args.logging_steps,
-        save_steps=args.save_steps,
-        eval_steps=args.eval_steps,
-        evaluation_strategy="steps" if eval_dataset is not None else "no",
-        save_total_limit=2,
-        bf16=args.bf16,
-        fp16=args.fp16,
-        report_to="none",
-        gradient_checkpointing=args.gradient_checkpointing,
-        optim="paged_adamw_8bit" if args.use_qlora else "adamw_torch",
-    )
+    training_args = build_training_arguments(args, has_eval_dataset=eval_dataset is not None)
 
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        data_collator=DataCollatorForSeq2Seq(tokenizer=tokenizer, padding=True),
     )
     trainer.train()
 
@@ -141,32 +232,53 @@ def train(args: argparse.Namespace) -> None:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LoRA/QLoRA fine-tuning.")
-    parser.add_argument("--model_name_or_path", default="models/qwen/Qwen3.5-9B")
-    parser.add_argument("--dataset_path", default="data/dataset.json")
-    parser.add_argument("--output_dir", default="models/qwen/lora_adapter")
-    parser.add_argument("--local_files_only", action="store_true")
+    parser.add_argument("--model_name_or_path", default=TRAINING_DEFAULTS["model_name_or_path"])
+    parser.add_argument("--dataset_path", default=TRAINING_DEFAULTS["dataset_path"])
+    parser.add_argument("--output_dir", default=TRAINING_DEFAULTS["output_dir"])
+    parser.add_argument(
+        "--allow_remote_download",
+        dest="local_files_only",
+        action="store_false",
+        default=TRAINING_DEFAULTS["local_files_only"],
+        help="Allow Transformers to download missing model/tokenizer files.",
+    )
     parser.add_argument("--use_qlora", action="store_true")
-    parser.add_argument("--epochs", type=float, default=3)
-    parser.add_argument("--learning_rate", type=float, default=2e-4)
-    parser.add_argument("--per_device_train_batch_size", type=int, default=1)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=8)
-    parser.add_argument("--max_seq_length", type=int, default=2048)
-    parser.add_argument("--train_ratio", type=float, default=0.9)
-    parser.add_argument("--val_ratio", type=float, default=0.1)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--lora_r", type=int, default=16)
-    parser.add_argument("--lora_alpha", type=int, default=32)
-    parser.add_argument("--lora_dropout", type=float, default=0.05)
+    parser.add_argument("--epochs", type=float, default=TRAINING_DEFAULTS["epochs"])
+    parser.add_argument("--learning_rate", type=float, default=TRAINING_DEFAULTS["learning_rate"])
+    parser.add_argument(
+        "--per_device_train_batch_size",
+        type=int,
+        default=TRAINING_DEFAULTS["per_device_train_batch_size"],
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=TRAINING_DEFAULTS["gradient_accumulation_steps"],
+    )
+    parser.add_argument("--max_seq_length", type=int, default=TRAINING_DEFAULTS["max_seq_length"])
+    parser.add_argument("--max_samples", type=int, default=0, help="Use first N samples for smoke testing.")
+    parser.add_argument("--train_ratio", type=float, default=TRAINING_DEFAULTS["train_ratio"])
+    parser.add_argument("--val_ratio", type=float, default=TRAINING_DEFAULTS["val_ratio"])
+    parser.add_argument("--seed", type=int, default=TRAINING_DEFAULTS["seed"])
+    parser.add_argument("--lora_r", type=int, default=TRAINING_DEFAULTS["lora_r"])
+    parser.add_argument("--lora_alpha", type=int, default=TRAINING_DEFAULTS["lora_alpha"])
+    parser.add_argument("--lora_dropout", type=float, default=TRAINING_DEFAULTS["lora_dropout"])
     parser.add_argument(
         "--target_modules",
-        default="q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj",
+        default=TRAINING_DEFAULTS["target_modules"],
     )
-    parser.add_argument("--logging_steps", type=int, default=10)
-    parser.add_argument("--save_steps", type=int, default=200)
-    parser.add_argument("--eval_steps", type=int, default=200)
-    parser.add_argument("--gradient_checkpointing", action="store_true")
-    parser.add_argument("--bf16", action="store_true")
-    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--logging_steps", type=int, default=TRAINING_DEFAULTS["logging_steps"])
+    parser.add_argument("--save_steps", type=int, default=TRAINING_DEFAULTS["save_steps"])
+    parser.add_argument("--eval_steps", type=int, default=TRAINING_DEFAULTS["eval_steps"])
+    parser.add_argument(
+        "--no_gradient_checkpointing",
+        dest="gradient_checkpointing",
+        action="store_false",
+        default=TRAINING_DEFAULTS["gradient_checkpointing"],
+    )
+    parser.add_argument("--no_bf16", dest="bf16", action="store_false", default=TRAINING_DEFAULTS["bf16"])
+    parser.add_argument("--fp16", action="store_true", default=TRAINING_DEFAULTS["fp16"])
+    parser.add_argument("--dry_run", action="store_true")
     return parser.parse_args()
 
 

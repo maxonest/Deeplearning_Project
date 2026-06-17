@@ -28,6 +28,7 @@ embeddings/faiss_index/*
 !embeddings/faiss_index/.gitkeep
 
 # Data scratch files
+data 2/
 data/**/*.tmp
 data/**/*.cache
 data/**/.DS_Store

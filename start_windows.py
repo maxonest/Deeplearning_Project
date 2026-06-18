@@ -54,7 +54,6 @@ def stream_process_output(process: subprocess.Popen, log_path: Path) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("w", encoding="utf-8") as log_file:
         for line in process.stdout:
-            print(line, end="", flush=True)
             log_file.write(line)
             log_file.flush()
 
@@ -141,6 +140,7 @@ def main() -> None:
     )
     print(f"Backend:  http://localhost:{backend_port}")
     print(f"Backend log: {BACKEND_LOG_PATH}")
+    print("Backend output is written to the log file and is not shown in this terminal.")
     processes = [backend]
 
     if not args.backend_only:

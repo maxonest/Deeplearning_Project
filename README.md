@@ -144,6 +144,9 @@ Windows 后端启动日志会同时写入 `logs/backend_startup.log`。如果后
 请提供日志中最后一条 `Model load stage` 以及其后的 faulthandler 调用栈，用于判断
 崩溃发生在依赖导入、tokenizer、基础模型还是 LoRA adapter 加载阶段。
 
+`start_windows.py` 不会在终端实时输出后端日志；Uvicorn、知识库和模型加载日志只写入
+`logs/backend_startup.log`。终端仅显示服务地址、日志路径和进程退出摘要。
+
 macOS/Linux 可使用：
 
 ```bash

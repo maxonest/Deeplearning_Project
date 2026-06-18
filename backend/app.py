@@ -24,7 +24,7 @@ from backend.schemas import (
 from utils.config import settings
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error")
 
 memory = ConversationMemory(
     max_recent_turns=settings.max_recent_turns,

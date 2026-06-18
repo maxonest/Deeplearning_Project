@@ -139,6 +139,11 @@ Invoke-RestMethod `
 不会在未加载微调参数的情况下继续提供服务。不要使用多个 Uvicorn worker，否则每个
 worker 都会各自加载一份模型并占用显存。
 
+Windows 后端启动日志会同时写入 `logs/backend_startup.log`。如果后端进程出现
+`3221225725 (0xC00000FD)`，这是 Windows 原生栈溢出，而不是普通 Python 异常。
+请提供日志中最后一条 `Model load stage` 以及其后的 faulthandler 调用栈，用于判断
+崩溃发生在依赖导入、tokenizer、基础模型还是 LoRA adapter 加载阶段。
+
 macOS/Linux 可使用：
 
 ```bash

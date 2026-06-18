@@ -12,12 +12,23 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
+LOG_DIR = ROOT_DIR / "logs"
+BACKEND_LOG_PATH = LOG_DIR / "backend_startup.log"
+
+WINDOWS_EXCEPTION_CODES = {
+    0xC0000005: "access violation",
+    0xC0000017: "out of memory",
+    0xC00000FD: "stack overflow",
+    0xC0000135: "missing DLL",
+    0xC0000409: "stack buffer overrun / fast fail",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,9 +49,53 @@ def load_dotenv_if_available() -> None:
     load_dotenv(ROOT_DIR / ".env")
 
 
-def start_process(command: list[str], cwd: Path, env: dict[str, str]) -> subprocess.Popen:
+def stream_process_output(process: subprocess.Popen, log_path: Path) -> None:
+    assert process.stdout is not None
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("w", encoding="utf-8") as log_file:
+        for line in process.stdout:
+            print(line, end="", flush=True)
+            log_file.write(line)
+            log_file.flush()
+
+
+def start_process(
+    command: list[str],
+    cwd: Path,
+    env: dict[str, str],
+    log_path: Path | None = None,
+) -> subprocess.Popen:
     print(f"Starting: {' '.join(command)}")
-    return subprocess.Popen(command, cwd=str(cwd), env=env)
+    if log_path is None:
+        return subprocess.Popen(command, cwd=str(cwd), env=env)
+
+    process = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        bufsize=1,
+    )
+    output_thread = threading.Thread(
+        target=stream_process_output,
+        args=(process, log_path),
+        daemon=True,
+    )
+    output_thread.start()
+    setattr(process, "output_thread", output_thread)
+    return process
+
+
+def describe_return_code(return_code: int) -> str:
+    unsigned_code = return_code & 0xFFFFFFFF
+    exception_name = WINDOWS_EXCEPTION_CODES.get(unsigned_code)
+    if exception_name is None:
+        return str(return_code)
+    return f"{return_code} (0x{unsigned_code:08X}: Windows {exception_name})"
 
 
 def main() -> None:
@@ -51,6 +106,9 @@ def main() -> None:
 
     env = os.environ.copy()
     env.setdefault("VITE_API_BASE_URL", f"http://localhost:{backend_port}")
+    env.setdefault("PYTHONFAULTHANDLER", "1")
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    env.setdefault("PYTHONUTF8", "1")
 
     npm = None
     if not args.backend_only:
@@ -64,6 +122,8 @@ def main() -> None:
     backend = start_process(
         [
             sys.executable,
+            "-X",
+            "faulthandler",
             "-m",
             "uvicorn",
             "backend.app:app",
@@ -74,8 +134,10 @@ def main() -> None:
         ],
         cwd=ROOT_DIR,
         env=env,
+        log_path=BACKEND_LOG_PATH,
     )
     print(f"Backend:  http://localhost:{backend_port}")
+    print(f"Backend log: {BACKEND_LOG_PATH}")
     processes = [backend]
 
     if not args.backend_only:
@@ -104,7 +166,18 @@ def main() -> None:
             for process in processes:
                 return_code = process.poll()
                 if return_code is not None:
-                    raise RuntimeError(f"Service exited with code {return_code}")
+                    output_thread = getattr(process, "output_thread", None)
+                    if output_thread is not None:
+                        output_thread.join(timeout=2)
+                    code_description = describe_return_code(return_code)
+                    log_hint = (
+                        f" See backend log: {BACKEND_LOG_PATH}"
+                        if process is backend
+                        else ""
+                    )
+                    raise RuntimeError(
+                        f"Service exited with code {code_description}.{log_hint}"
+                    )
             time.sleep(1)
     except KeyboardInterrupt:
         print("Stopping services...")

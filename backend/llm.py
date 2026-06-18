@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from threading import Thread
 from typing import Iterator
 from typing import Protocol
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class LLMClient(Protocol):
@@ -69,6 +73,11 @@ class TransformersLLMClient:
     def load(self) -> None:
         if self.is_loaded:
             return
+        logger.info(
+            "Model load stage 1/6: validating paths. base_model=%s, lora_adapter=%s",
+            self.model_path,
+            self.lora_adapter_path or "disabled",
+        )
         if not self.model_path.exists():
             raise FileNotFoundError(
                 f"Local model path does not exist: {self.model_path}. "
@@ -91,17 +100,32 @@ class TransformersLLMClient:
                 expected = " or ".join(str(path) for path in adapter_weights)
                 raise FileNotFoundError(f"LoRA adapter weights do not exist. Expected {expected}")
 
+        logger.info("Model load stage 2/6: importing torch and transformers.")
         import torch
+        import transformers
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        logger.info(
+            "Runtime versions: python dependencies torch=%s, transformers=%s, cuda_runtime=%s.",
+            torch.__version__,
+            transformers.__version__,
+            torch.version.cuda,
+        )
         self._torch = torch
         dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
         device_map = "auto" if torch.cuda.is_available() else None
 
+        logger.info("Model load stage 3/6: loading tokenizer.")
         self._tokenizer = AutoTokenizer.from_pretrained(
             str(self.model_path),
             trust_remote_code=True,
             local_files_only=self.local_files_only,
+        )
+        logger.info(
+            "Model load stage 4/6: loading base model. cuda=%s, dtype=%s, device_map=%s",
+            torch.cuda.is_available(),
+            dtype,
+            device_map,
         )
         self._model = AutoModelForCausalLM.from_pretrained(
             str(self.model_path),
@@ -111,16 +135,22 @@ class TransformersLLMClient:
             local_files_only=self.local_files_only,
         )
         if self.lora_adapter_path is not None:
+            logger.info("Model load stage 5/6: importing PEFT and mounting LoRA adapter.")
+            import peft
             from peft import PeftModel
 
+            logger.info("Runtime version: peft=%s.", peft.__version__)
             self._model = PeftModel.from_pretrained(
                 self._model,
                 str(self.lora_adapter_path),
                 local_files_only=self.local_files_only,
             )
+        else:
+            logger.info("Model load stage 5/6: LoRA adapter disabled.")
         if not torch.cuda.is_available():
             self._model.to("cpu")
         self._model.eval()
+        logger.info("Model load stage 6/6: model is ready for inference.")
 
     def _format_chat_prompt(self, prompt: str, enable_thinking: bool | None = None) -> str:
         assert self._tokenizer is not None

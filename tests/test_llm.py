@@ -51,15 +51,18 @@ def test_load_mounts_lora_adapter(monkeypatch, tmp_path):
             return peft_model
 
     fake_torch = SimpleNamespace(
+        __version__="test",
         bfloat16="bfloat16",
         float32="float32",
         cuda=SimpleNamespace(is_available=lambda: False),
+        version=SimpleNamespace(cuda=None),
     )
     fake_transformers = SimpleNamespace(
+        __version__="test",
         AutoModelForCausalLM=FakeAutoModel,
         AutoTokenizer=FakeAutoTokenizer,
     )
-    fake_peft = SimpleNamespace(PeftModel=FakePeftModel)
+    fake_peft = SimpleNamespace(__version__="test", PeftModel=FakePeftModel)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
     monkeypatch.setitem(sys.modules, "transformers", fake_transformers)
     monkeypatch.setitem(sys.modules, "peft", fake_peft)

@@ -1,8 +1,4 @@
-"""LLM clients used by the backend.
-
-The Transformers model is loaded lazily on the first request. This keeps API
-startup fast and lets unit tests use the lightweight placeholder client.
-"""
+"""LLM clients used by the backend."""
 
 from __future__ import annotations
 
@@ -13,6 +9,9 @@ from typing import Protocol
 
 
 class LLMClient(Protocol):
+    def load(self) -> None:
+        """Load model resources if needed."""
+
     def generate(self, prompt: str, enable_thinking: bool | None = None) -> str:
         """Generate text from a prompt."""
 
@@ -22,6 +21,9 @@ class LLMClient(Protocol):
 
 class PlaceholderLLMClient:
     """Safe fallback when local model loading is disabled."""
+
+    def load(self) -> None:
+        return
 
     def generate(self, prompt: str, enable_thinking: bool | None = None) -> str:
         return (
@@ -37,7 +39,7 @@ class PlaceholderLLMClient:
 
 
 class TransformersLLMClient:
-    """Lazy local inference client for Qwen/DeepSeek/GLM style causal LMs."""
+    """Local inference client for Qwen/DeepSeek/GLM style causal LMs."""
 
     def __init__(
         self,
@@ -47,8 +49,10 @@ class TransformersLLMClient:
         top_p: float = 0.9,
         enable_thinking: bool = False,
         local_files_only: bool = True,
+        lora_adapter_path: str | Path | None = None,
     ) -> None:
         self.model_path = Path(model_path)
+        self.lora_adapter_path = Path(lora_adapter_path) if lora_adapter_path else None
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
@@ -62,7 +66,7 @@ class TransformersLLMClient:
     def is_loaded(self) -> bool:
         return self._model is not None and self._tokenizer is not None
 
-    def _load(self) -> None:
+    def load(self) -> None:
         if self.is_loaded:
             return
         if not self.model_path.exists():
@@ -70,6 +74,22 @@ class TransformersLLMClient:
                 f"Local model path does not exist: {self.model_path}. "
                 "Set LOCAL_MODEL_PATH in .env, for example models/qwen/Qwen3.5-9B."
             )
+        if self.lora_adapter_path is not None:
+            if not self.lora_adapter_path.exists():
+                raise FileNotFoundError(
+                    f"LoRA adapter path does not exist: {self.lora_adapter_path}. "
+                    "Set LOCAL_LORA_ADAPTER_PATH to the trained adapter directory."
+                )
+            adapter_config = self.lora_adapter_path / "adapter_config.json"
+            adapter_weights = (
+                self.lora_adapter_path / "adapter_model.safetensors",
+                self.lora_adapter_path / "adapter_model.bin",
+            )
+            if not adapter_config.is_file():
+                raise FileNotFoundError(f"LoRA adapter config does not exist: {adapter_config}")
+            if not any(path.is_file() for path in adapter_weights):
+                expected = " or ".join(str(path) for path in adapter_weights)
+                raise FileNotFoundError(f"LoRA adapter weights do not exist. Expected {expected}")
 
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -90,6 +110,14 @@ class TransformersLLMClient:
             trust_remote_code=True,
             local_files_only=self.local_files_only,
         )
+        if self.lora_adapter_path is not None:
+            from peft import PeftModel
+
+            self._model = PeftModel.from_pretrained(
+                self._model,
+                str(self.lora_adapter_path),
+                local_files_only=self.local_files_only,
+            )
         if not torch.cuda.is_available():
             self._model.to("cpu")
         self._model.eval()
@@ -118,7 +146,7 @@ class TransformersLLMClient:
         return prompt
 
     def _build_generation_inputs(self, prompt: str, enable_thinking: bool | None = None):
-        self._load()
+        self.load()
         assert self._torch is not None
         assert self._model is not None
         assert self._tokenizer is not None
@@ -183,11 +211,13 @@ def build_llm_client(
     top_p: float,
     enable_thinking: bool = False,
     local_files_only: bool = True,
+    lora_adapter_path: str | Path | None = None,
 ) -> LLMClient:
     if not use_local_model:
         return PlaceholderLLMClient()
     return TransformersLLMClient(
         model_path=model_path,
+        lora_adapter_path=lora_adapter_path,
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_p=top_p,

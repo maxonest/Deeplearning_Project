@@ -3,7 +3,21 @@ from fastapi.testclient import TestClient
 import backend.app as app_module
 
 
+class FakeLLM:
+    def __init__(self):
+        self.is_loaded = False
+
+    def load(self) -> None:
+        self.is_loaded = True
+
+    def generate(self, prompt: str, enable_thinking: bool | None = None) -> str:
+        return f"模型回答:{prompt}"
+
+
 class FakePipeline:
+    def __init__(self):
+        self.llm_client = FakeLLM()
+
     def answer(
         self,
         question: str,
@@ -25,6 +39,32 @@ def test_health_endpoint():
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+    assert "model_loaded" in response.json()
+
+
+def test_model_endpoint_calls_llm_directly(monkeypatch):
+    monkeypatch.setattr(app_module.settings, "use_local_model", True)
+    pipeline = FakePipeline()
+    pipeline.llm_client.load()
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+    client = TestClient(app_module.app)
+
+    response = client.post("/api/model/test", json={"prompt": "测试LoRA"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["answer"] == "模型回答:测试LoRA"
+    assert payload["model_loaded"] is True
+
+
+def test_preload_local_model_loads_configured_client(monkeypatch):
+    pipeline = FakePipeline()
+    monkeypatch.setattr(app_module.settings, "use_local_model", True)
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+
+    app_module.preload_local_model()
+
+    assert pipeline.llm_client.is_loaded is True
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):

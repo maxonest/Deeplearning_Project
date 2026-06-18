@@ -22,6 +22,11 @@ from utils.config import settings  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run local model inference.")
     parser.add_argument("--model_path", default=str(settings.local_model_path))
+    parser.add_argument(
+        "--lora_adapter_path",
+        default=str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None,
+        help="Optional trained PEFT LoRA adapter directory.",
+    )
     parser.add_argument("--prompt", default="你好，请用一句话说明你是谁。")
     parser.add_argument("--max_new_tokens", type=int, default=settings.local_model_max_new_tokens)
     parser.add_argument("--temperature", type=float, default=settings.local_model_temperature)
@@ -36,8 +41,12 @@ def main() -> None:
     model_path = Path(args.model_path)
     if not model_path.is_absolute():
         model_path = PROJECT_ROOT / model_path
+    lora_adapter_path = Path(args.lora_adapter_path) if args.lora_adapter_path else None
+    if lora_adapter_path is not None and not lora_adapter_path.is_absolute():
+        lora_adapter_path = PROJECT_ROOT / lora_adapter_path
     client = TransformersLLMClient(
         model_path=model_path,
+        lora_adapter_path=lora_adapter_path,
         max_new_tokens=args.max_new_tokens,
         temperature=args.temperature,
         top_p=args.top_p,

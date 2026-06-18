@@ -49,6 +49,7 @@ class RAGPipeline:
         self.llm_client = llm_client or build_llm_client(
             use_local_model=settings.use_local_model,
             model_path=settings.local_model_path,
+            lora_adapter_path=settings.local_lora_adapter_path,
             max_new_tokens=settings.local_model_max_new_tokens,
             temperature=settings.local_model_temperature,
             top_p=settings.local_model_top_p,

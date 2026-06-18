@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     use_local_model: bool = False
     local_model_path: Path = PROJECT_ROOT / "models" / "qwen" / "Qwen3.5-9B"
+    local_lora_adapter_path: Path | None = None
     local_model_max_new_tokens: int = 2048
     local_model_temperature: float = 0.2
     local_model_top_p: float = 0.9
@@ -62,16 +63,26 @@ class Settings(BaseSettings):
             return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
+    @field_validator("local_lora_adapter_path", mode="before")
+    @classmethod
+    def parse_optional_path(cls, value: Any) -> Any:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            return None
+        return value
+
     @field_validator(
         "dataset_path",
         "raw_data_dir",
         "processed_data_dir",
         "faiss_index_dir",
         "local_model_path",
+        "local_lora_adapter_path",
         mode="after",
     )
     @classmethod
-    def resolve_relative_paths(cls, value: Path) -> Path:
+    def resolve_relative_paths(cls, value: Path | None) -> Path | None:
+        if value is None:
+            return None
         if value.is_absolute():
             return value
         return PROJECT_ROOT / value

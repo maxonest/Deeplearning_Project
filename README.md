@@ -7,7 +7,7 @@
 - 数据集构建：JSON/JSONL 数据加载、字段标准化、训练/验证/测试划分。
 - 知识库构建：读取 `txt/md/csv` 语料，切块后用 sentence-transformers 生成 embedding，并保存 FAISS 索引。
 - 本地 RAG：FastAPI 接收问题，管理多轮会话，检索 top-k 文档，拼接上下文后调用本地模型。
-- 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM。
+- 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM，并可通过 PEFT 挂载 LoRA adapter。
 - 微调训练：基于 PyTorch 自定义训练循环 + PEFT 进行 LoRA/QLoRA SFT，避免 Windows 环境中 `Trainer/datasets/pyarrow` 的兼容性问题。
 - 前端页面：React 18 + Vite 多轮对话 UI，支持 top-k 参数和召回来源展示。
 - 测试：覆盖数据处理、多轮记忆、RAG 提示词链路和 FastAPI 接口。
@@ -78,6 +78,7 @@ copy .env.example .env
 ```env
 USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
+LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
 LOCAL_MODEL_MAX_NEW_TOKENS=2048
 LOCAL_MODEL_TEMPERATURE=0.2
 LOCAL_MODEL_TOP_P=0.9
@@ -90,9 +91,69 @@ LOCAL_MODEL_ENABLE_THINKING=false
 python models/run_local_model.py --prompt "你好，请介绍一下你自己"
 ```
 
+配置了 `LOCAL_LORA_ADAPTER_PATH` 后，上述命令会先加载 `LOCAL_MODEL_PATH`
+中的基础模型，再挂载 LoRA adapter。也可以在命令行中显式指定：
+
+```powershell
+python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --lora_adapter_path models/qwen/lora_adapter --prompt "你好，请介绍一下你自己"
+```
+
+从其他机器复制 adapter 时，目录中至少需要包含
+`adapter_config.json` 和 `adapter_model.safetensors`（或 `adapter_model.bin`），
+并且基础模型必须与训练 LoRA 时使用的模型兼容。不使用 LoRA 时，从 `.env`
+中删除 `LOCAL_LORA_ADAPTER_PATH` 或将其留空。
+
 如果能正常输出，再启动系统。
 
-### 4. 启动前后端
+### 4. 启动后端测试模型
+
+只启动 FastAPI，不启动前端：
+
+```powershell
+python start_windows.py --backend-only
+```
+
+当 `USE_LOCAL_MODEL=true` 时，FastAPI 会在启动阶段加载基础模型并挂载 LoRA。
+终端出现 `Application startup complete` 后才表示模型准备完毕，此时再在另一个
+PowerShell 窗口执行：
+
+```powershell
+$body = @{
+  prompt = "请用一句话说明你擅长的专业领域"
+  enable_thinking = $false
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri "http://localhost:8000/api/model/test" `
+  -Method Post `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+模型加载耗时会转移到后端启动阶段，第一次请求无需再等待权重加载。返回结果中的
+`model_loaded` 应为 `true`，`local_lora_adapter_path` 应指向
+`models/qwen/lora_adapter`。也可以访问 `http://localhost:8000/health`
+确认模型是否已经加载。
+
+如果基础模型或 LoRA 路径错误、adapter 文件不完整，后端会在启动阶段直接报错并退出，
+不会在未加载微调参数的情况下继续提供服务。不要使用多个 Uvicorn worker，否则每个
+worker 都会各自加载一份模型并占用显存。
+
+macOS/Linux 可使用：
+
+```bash
+uvicorn backend.app:app --host 0.0.0.0 --port 8000
+```
+
+然后测试：
+
+```bash
+curl -X POST http://localhost:8000/api/model/test \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"请用一句话说明你擅长的专业领域","enable_thinking":false}'
+```
+
+### 5. 启动前后端
 
 Windows 不使用 `run.sh`：
 
@@ -257,6 +318,14 @@ pytest
 
 ```bash
 curl http://localhost:8000/health
+```
+
+直接测试当前配置的基础模型和 LoRA（不经过知识库检索）：
+
+```bash
+curl -X POST http://localhost:8000/api/model/test \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"测试微调后的模型","enable_thinking":false}'
 ```
 
 问答接口：

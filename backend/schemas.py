@@ -12,7 +12,21 @@ from utils.config import settings
 class HealthResponse(BaseModel):
     status: str
     use_local_model: bool
+    model_loaded: bool
     local_model_path: str
+    local_lora_adapter_path: str | None
+
+
+class ModelTestRequest(BaseModel):
+    prompt: str = Field(default="你好，请用一句话介绍你自己。", min_length=1)
+    enable_thinking: bool = Field(default=settings.local_model_enable_thinking)
+
+
+class ModelTestResponse(BaseModel):
+    answer: str
+    model_loaded: bool
+    local_model_path: str
+    local_lora_adapter_path: str | None
 
 
 class ChatRequest(BaseModel):
@@ -37,4 +51,5 @@ class ConfigResponse(BaseModel):
     default_top_k: int
     use_local_model: bool
     local_model_path: str
+    local_lora_adapter_path: str | None
     embedding_model: str

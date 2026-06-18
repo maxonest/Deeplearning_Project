@@ -113,9 +113,8 @@ python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --lora_adap
 python start_windows.py --backend-only
 ```
 
-当 `USE_LOCAL_MODEL=true` 时，FastAPI 会在启动阶段加载基础模型并挂载 LoRA。
-终端出现 `Application startup complete` 后才表示模型准备完毕，此时再在另一个
-PowerShell 窗口执行：
+当 `USE_LOCAL_MODEL=true` 时，FastAPI 启动后会在后台加载基础模型并挂载 LoRA。
+等待 `/health` 返回 `startup_ready=true` 后，再在另一个 PowerShell 窗口执行：
 
 ```powershell
 $body = @{
@@ -135,9 +134,13 @@ Invoke-RestMethod `
 `models/qwen/lora_adapter`。也可以访问 `http://localhost:8000/health`
 确认模型是否已经加载。
 
-如果基础模型或 LoRA 路径错误、adapter 文件不完整，后端会在启动阶段直接报错并退出，
-不会在未加载微调参数的情况下继续提供服务。不要使用多个 Uvicorn worker，否则每个
-worker 都会各自加载一份模型并占用显存。
+FastAPI 启动后会立即开放 `/health`，知识库和模型在后台继续初始化。前端每
+1.5 秒轮询健康状态，并依次显示“知识库构建中”“模型加载中”“系统就绪”。
+初始化完成前输入框和发送按钮保持禁用，完成后自动解锁，无需刷新页面。
+
+如果基础模型或 LoRA 路径错误、adapter 文件不完整，`/health` 会返回
+`startup_phase=failed` 和具体的 `startup_error`，聊天接口保持不可用。不要使用多个
+Uvicorn worker，否则每个 worker 都会各自加载一份模型并占用显存。
 
 Windows 后端启动日志会同时写入 `logs/backend_startup.log`。如果后端进程出现
 `3221225725 (0xC00000FD)`，这是 Windows 原生栈溢出，而不是普通 Python 异常。

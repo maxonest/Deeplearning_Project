@@ -11,6 +11,10 @@ from utils.config import settings
 
 class HealthResponse(BaseModel):
     status: str
+    startup_phase: str
+    startup_ready: bool
+    startup_message: str
+    startup_error: str | None
     use_local_model: bool
     model_loaded: bool
     knowledge_base_ready: bool

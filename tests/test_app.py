@@ -66,13 +66,26 @@ class FakeRetriever:
         return [{"source": "fake-sft.json#0", "text": "测试", "score": 1.0}]
 
 
+def set_runtime_ready():
+    app_module.update_startup_state(
+        startup_phase="ready",
+        startup_ready=True,
+        startup_message="系统已就绪",
+        startup_error=None,
+    )
+
+
 def test_health_endpoint():
     client = TestClient(app_module.app)
 
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] in {"ok", "degraded"}
+    assert response.json()["status"] in {"ok", "degraded", "initializing", "failed"}
+    assert "startup_phase" in response.json()
+    assert "startup_ready" in response.json()
+    assert "startup_message" in response.json()
+    assert "startup_error" in response.json()
     assert "model_loaded" in response.json()
     assert "knowledge_base_ready" in response.json()
     assert "knowledge_base_chunks" in response.json()
@@ -80,6 +93,7 @@ def test_health_endpoint():
 
 
 def test_model_endpoint_calls_llm_directly(monkeypatch):
+    set_runtime_ready()
     monkeypatch.setattr(app_module.settings, "use_local_model", True)
     pipeline = FakePipeline()
     pipeline.llm_client.load()
@@ -182,6 +196,7 @@ def test_failed_rebuild_disables_repeated_retrieval(monkeypatch, tmp_path):
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):
+    set_runtime_ready()
     pipeline = FakePipeline()
     monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
     client = TestClient(app_module.app)
@@ -194,3 +209,41 @@ def test_chat_endpoint_uses_pipeline(monkeypatch):
     assert payload["session_id"]
     assert payload["documents"][0]["source"] == "fake"
     assert "测试问题" not in (pipeline.last_memory_context or "")
+
+
+def test_chat_endpoint_rejects_requests_until_runtime_is_ready():
+    app_module.update_startup_state(
+        startup_phase="model",
+        startup_ready=False,
+        startup_message="模型加载中",
+        startup_error=None,
+    )
+    client = TestClient(app_module.app)
+
+    response = client.post("/api/chat", json={"question": "你好"})
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "模型加载中"
+
+
+def test_initialize_runtime_exposes_model_phase_and_ready_state(monkeypatch):
+    phases = []
+    monkeypatch.setattr(
+        app_module,
+        "rebuild_knowledge_base",
+        lambda: phases.append(app_module.get_startup_state()["startup_phase"]),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "preload_local_model",
+        lambda: phases.append(app_module.get_startup_state()["startup_phase"]),
+    )
+    monkeypatch.setattr(app_module.settings, "use_local_model", True)
+    app_module.update_startup_state(knowledge_base_ready=True)
+
+    app_module.initialize_runtime()
+
+    state = app_module.get_startup_state()
+    assert phases == ["knowledge_base", "model"]
+    assert state["startup_phase"] == "ready"
+    assert state["startup_ready"] is True

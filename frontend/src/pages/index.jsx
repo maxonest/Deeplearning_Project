@@ -1,10 +1,52 @@
-import React, { useMemo, useState } from "react";
-import { Brain, RotateCcw, SendHorizontal, SlidersHorizontal } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import {
+  Brain,
+  CircleAlert,
+  LoaderCircle,
+  RotateCcw,
+  SendHorizontal,
+  SlidersHorizontal,
+} from "lucide-react";
 import ChatMessage from "../components/ChatMessage.jsx";
 import SourceList from "../components/SourceList.jsx";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 const ASSISTANT_STREAM_KEY = "assistant-streaming";
+const INITIAL_HEALTH = {
+  status: "connecting",
+  startup_phase: "connecting",
+  startup_ready: false,
+  startup_message: "正在连接后端",
+  startup_error: null,
+  model_loaded: false,
+  knowledge_base_ready: false,
+  knowledge_base_chunks: 0,
+};
+
+function getStatusPresentation(health, loading) {
+  if (loading) {
+    return { label: "生成中", detail: "模型正在组织回答", tone: "busy" };
+  }
+  if (health.status === "offline") {
+    return { label: "等待后端", detail: "正在尝试连接本地服务", tone: "waiting" };
+  }
+  if (health.startup_phase === "knowledge_base") {
+    return { label: "知识库构建中", detail: "正在准备本地检索索引", tone: "waiting" };
+  }
+  if (health.startup_phase === "model") {
+    return { label: "模型加载中", detail: "正在加载基础模型与 LoRA", tone: "waiting" };
+  }
+  if (health.startup_phase === "failed") {
+    return { label: "初始化失败", detail: health.startup_error || "请检查后端日志", tone: "error" };
+  }
+  if (health.status === "degraded") {
+    return { label: "模型已就绪", detail: "知识库暂不可用，将使用模型直接回答", tone: "warning" };
+  }
+  if (health.startup_ready) {
+    return { label: "系统就绪", detail: "模型与知识库均可用", tone: "ready" };
+  }
+  return { label: "后端启动中", detail: health.startup_message || "请稍候", tone: "waiting" };
+}
 
 function parseSseChunk(buffer) {
   const events = [];
@@ -31,7 +73,7 @@ export default function IndexPage() {
   const [messages, setMessages] = useState([
     {
       role: "assistant",
-      content: "本地专业知识问答系统已就绪。你可以输入领域问题，我会结合多轮上下文和 FAISS 知识库进行回答。",
+      content: "正在连接本地问答服务。系统准备完成后，你就可以开始提问。",
     },
   ]);
   const [question, setQuestion] = useState("");
@@ -40,16 +82,63 @@ export default function IndexPage() {
   const [documents, setDocuments] = useState([]);
   const [loading, setLoading] = useState(false);
   const [enableThinking, setEnableThinking] = useState(false);
+  const [health, setHealth] = useState(INITIAL_HEALTH);
 
   const turnCount = useMemo(
     () => messages.filter((message) => message.role === "user").length,
     [messages],
   );
+  const statusPresentation = getStatusPresentation(health, loading);
+  const systemReady = health.startup_ready && health.startup_phase !== "failed";
+
+  useEffect(() => {
+    let active = true;
+    let timerId;
+
+    async function checkHealth() {
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 2500);
+      try {
+        const response = await fetch(`${API_BASE_URL}/health`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const payload = await response.json();
+        if (active) {
+          setHealth(payload);
+        }
+      } catch {
+        if (active) {
+          setHealth((current) => ({
+            ...current,
+            status: "offline",
+            startup_phase: "connecting",
+            startup_ready: false,
+            startup_message: "正在连接后端",
+          }));
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        if (active) {
+          timerId = window.setTimeout(checkHealth, 1500);
+        }
+      }
+    }
+
+    checkHealth();
+    return () => {
+      active = false;
+      window.clearTimeout(timerId);
+    };
+  }, []);
 
   async function sendMessage(event) {
     event.preventDefault();
     const trimmed = question.trim();
-    if (!trimmed || loading) return;
+    if (!trimmed || loading || !systemReady) return;
 
     setMessages((current) => [...current, { role: "user", content: trimmed }]);
     setQuestion("");
@@ -73,7 +162,8 @@ export default function IndexPage() {
       });
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+        const errorPayload = await response.json().catch(() => ({}));
+        throw new Error(errorPayload.detail || `HTTP ${response.status}`);
       }
 
       if (!response.body) {
@@ -118,15 +208,33 @@ export default function IndexPage() {
         ),
       );
     } catch (error) {
+      checkHealthAfterRequestFailure();
       setMessages((current) => [
         ...current.filter((message) => message.streamKey !== ASSISTANT_STREAM_KEY),
         {
           role: "assistant",
-          content: `请求失败：${error.message}。请确认后端服务已启动。`,
+          content: `请求未完成：${error.message}`,
         },
       ]);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function checkHealthAfterRequestFailure() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/health`, { cache: "no-store" });
+      if (response.ok) {
+        setHealth(await response.json());
+      }
+    } catch {
+      setHealth((current) => ({
+        ...current,
+        status: "offline",
+        startup_phase: "connecting",
+        startup_ready: false,
+        startup_message: "后端连接已中断",
+      }));
     }
   }
 
@@ -139,7 +247,7 @@ export default function IndexPage() {
     setMessages([
       {
         role: "assistant",
-        content: "上下文已清空，可以开始新的专业问答。",
+        content: systemReady ? "上下文已清空，可以开始新的专业问答。" : "上下文已清空，正在等待系统就绪。",
       },
     ]);
   }
@@ -199,8 +307,34 @@ export default function IndexPage() {
             <span>多轮对话工作台</span>
             <h2>今天想查询什么？</h2>
           </div>
-          <div className={`statusDot ${loading ? "statusBusy" : ""}`}>{loading ? "生成中" : "在线"}</div>
+          <div className={`statusCluster status-${statusPresentation.tone}`}>
+            <div className="statusIcon" aria-hidden="true">
+              {statusPresentation.tone === "error" ? (
+                <CircleAlert size={16} />
+              ) : statusPresentation.tone === "waiting" || statusPresentation.tone === "busy" ? (
+                <LoaderCircle className="statusSpinner" size={16} />
+              ) : (
+                <span className="statusPulse" />
+              )}
+            </div>
+            <div>
+              <strong>{statusPresentation.label}</strong>
+              <span>{statusPresentation.detail}</span>
+            </div>
+          </div>
         </div>
+
+        {!systemReady && (
+          <div className={`startupNotice startupNotice-${statusPresentation.tone}`} role="status">
+            <div className="startupNoticeMark">
+              {statusPresentation.tone === "error" ? <CircleAlert size={18} /> : <LoaderCircle size={18} />}
+            </div>
+            <div>
+              <strong>{statusPresentation.label}</strong>
+              <p>{statusPresentation.detail}。系统准备完成后，输入框会自动解锁。</p>
+            </div>
+          </div>
+        )}
 
         <div className="messageList">
           {messages.map((message, index) => (
@@ -211,8 +345,9 @@ export default function IndexPage() {
         <form className="composer" onSubmit={sendMessage}>
           <textarea
             value={question}
-            placeholder="输入你的领域问题..."
+            placeholder={systemReady ? "输入你的领域问题..." : statusPresentation.label}
             rows={3}
+            disabled={!systemReady || loading}
             onChange={(event) => setQuestion(event.target.value)}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey) {
@@ -225,14 +360,19 @@ export default function IndexPage() {
             <button
               className={`thinkingButton ${enableThinking ? "thinkingButtonActive" : ""}`}
               type="button"
-              disabled={loading}
+              disabled={loading || !systemReady}
               onClick={() => setEnableThinking((current) => !current)}
               title="切换深度思考"
             >
               <Brain size={16} />
               深度思考
             </button>
-            <button className="sendButton" type="submit" disabled={loading || !question.trim()} title="发送">
+            <button
+              className="sendButton"
+              type="submit"
+              disabled={loading || !systemReady || !question.trim()}
+              title={systemReady ? "发送" : statusPresentation.label}
+            >
               <SendHorizontal size={18} />
               发送
             </button>

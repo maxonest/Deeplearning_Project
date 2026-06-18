@@ -17,9 +17,15 @@ class Retriever(Protocol):
 class FaissRetriever:
     """Lazy FAISS retriever wrapper."""
 
-    def __init__(self, index_dir: str | Path, embedding_model: str) -> None:
+    def __init__(
+        self,
+        index_dir: str | Path,
+        embedding_model: str,
+        embedding_device: str | None = None,
+    ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
+        self.embedding_device = embedding_device
         self._kb = None
 
     @property
@@ -30,8 +36,24 @@ class FaissRetriever:
         if self._kb is None:
             from embeddings.embed_utils import FaissKnowledgeBase
 
-            self._kb = FaissKnowledgeBase(index_dir=self.index_dir, embedding_model=self.embedding_model)
+            self._kb = FaissKnowledgeBase(
+                index_dir=self.index_dir,
+                embedding_model=self.embedding_model,
+                device=self.embedding_device,
+            )
         return self._kb
+
+    def rebuild(
+        self,
+        input_paths: list[str | Path],
+        chunk_size: int,
+        overlap: int,
+    ) -> int:
+        return self._knowledge_base().build_from_sources(
+            input_paths,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
 
     def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
         if not self.exists:
@@ -59,6 +81,7 @@ class RAGPipeline:
         self.retriever = retriever or FaissRetriever(
             index_dir=settings.faiss_index_dir,
             embedding_model=settings.embedding_model,
+            embedding_device=settings.embedding_device,
         )
         self.max_context_chars = max_context_chars
 

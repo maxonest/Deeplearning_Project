@@ -17,6 +17,7 @@ class FakeLLM:
 class FakePipeline:
     def __init__(self):
         self.llm_client = FakeLLM()
+        self.retriever = FakeRetriever()
 
     def answer(
         self,
@@ -32,6 +33,21 @@ class FakePipeline:
         }
 
 
+class FakeRetriever:
+    exists = False
+
+    def __init__(self):
+        self.rebuild_sources = []
+
+    def rebuild(self, input_paths, chunk_size, overlap):
+        self.rebuild_sources = input_paths
+        self.exists = True
+        return 12
+
+    def search(self, query, top_k):
+        return [{"source": "fake-sft.json#0", "text": "测试", "score": 1.0}]
+
+
 def test_health_endpoint():
     client = TestClient(app_module.app)
 
@@ -40,6 +56,8 @@ def test_health_endpoint():
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
     assert "model_loaded" in response.json()
+    assert "knowledge_base_ready" in response.json()
+    assert "knowledge_base_chunks" in response.json()
 
 
 def test_model_endpoint_calls_llm_directly(monkeypatch):
@@ -65,6 +83,25 @@ def test_preload_local_model_loads_configured_client(monkeypatch):
     app_module.preload_local_model()
 
     assert pipeline.llm_client.is_loaded is True
+
+
+def test_rebuild_knowledge_base_includes_finetune_dataset(monkeypatch, tmp_path):
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    finetune_path = tmp_path / "sft_dataset_clean.json"
+    finetune_path.write_text("[]", encoding="utf-8")
+    pipeline = FakePipeline()
+
+    monkeypatch.setattr(app_module.settings, "rebuild_knowledge_base_on_startup", True)
+    monkeypatch.setattr(app_module.settings, "processed_data_dir", processed_dir)
+    monkeypatch.setattr(app_module.settings, "finetune_dataset_path", finetune_path)
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+
+    app_module.rebuild_knowledge_base()
+
+    assert pipeline.retriever.rebuild_sources == [processed_dir, finetune_path]
+    assert app_module.startup_state["knowledge_base_ready"] is True
+    assert app_module.startup_state["knowledge_base_chunks"] == 12
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):

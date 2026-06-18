@@ -31,6 +31,67 @@ memory = ConversationMemory(
     max_context_chars=settings.max_context_chars,
 )
 rag_pipeline = RAGPipeline()
+startup_state = {
+    "knowledge_base_ready": False,
+    "knowledge_base_chunks": 0,
+}
+
+
+def rebuild_knowledge_base() -> None:
+    startup_state["knowledge_base_ready"] = False
+    startup_state["knowledge_base_chunks"] = 0
+    if not settings.rebuild_knowledge_base_on_startup:
+        startup_state["knowledge_base_ready"] = bool(
+            getattr(rag_pipeline.retriever, "exists", False)
+        )
+        logger.info(
+            "Knowledge-base startup rebuild is disabled. existing_index=%s",
+            startup_state["knowledge_base_ready"],
+        )
+        return
+
+    sources = [settings.processed_data_dir]
+    if settings.finetune_dataset_path.is_file():
+        sources.append(settings.finetune_dataset_path)
+    else:
+        logger.warning(
+            "Fine-tuning dataset was not found and will not be indexed: %s",
+            settings.finetune_dataset_path,
+        )
+
+    logger.info(
+        "Knowledge-base stage 1/3: rebuilding from sources=%s, embedding_model=%s, device=%s",
+        [str(source) for source in sources],
+        settings.embedding_model,
+        settings.embedding_device,
+    )
+    retriever = rag_pipeline.retriever
+    rebuild = getattr(retriever, "rebuild", None)
+    if rebuild is None:
+        raise RuntimeError("The configured retriever does not support startup rebuilding.")
+    chunk_count = rebuild(
+        input_paths=sources,
+        chunk_size=settings.chunk_size,
+        overlap=settings.chunk_overlap,
+    )
+    startup_state["knowledge_base_chunks"] = chunk_count
+    logger.info(
+        "Knowledge-base stage 2/3: saved %s chunks to %s",
+        chunk_count,
+        settings.faiss_index_dir,
+    )
+
+    hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
+    if not hits:
+        raise RuntimeError(
+            "Knowledge-base self-test returned no results after rebuilding the index."
+        )
+    startup_state["knowledge_base_ready"] = True
+    logger.info(
+        "Knowledge-base stage 3/3: self-test succeeded. query=%r, source=%s",
+        settings.knowledge_base_self_test_query,
+        hits[0].get("source", "unknown"),
+    )
 
 
 def preload_local_model() -> None:
@@ -53,6 +114,7 @@ def preload_local_model() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    rebuild_knowledge_base()
     preload_local_model()
     yield
 
@@ -74,6 +136,8 @@ def health() -> HealthResponse:
         status="ok",
         use_local_model=settings.use_local_model,
         model_loaded=bool(getattr(rag_pipeline.llm_client, "is_loaded", False)),
+        knowledge_base_ready=bool(startup_state["knowledge_base_ready"]),
+        knowledge_base_chunks=int(startup_state["knowledge_base_chunks"]),
         local_model_path=str(settings.local_model_path),
         local_lora_adapter_path=(
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None

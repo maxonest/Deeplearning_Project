@@ -11,7 +11,7 @@ import json
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 import numpy as np
 
@@ -91,6 +91,26 @@ def build_chunks(input_path: str | Path, chunk_size: int, overlap: int) -> list[
     return chunks
 
 
+def build_chunks_from_sources(
+    input_paths: Iterable[str | Path],
+    chunk_size: int,
+    overlap: int,
+) -> list[DocumentChunk]:
+    chunks: list[DocumentChunk] = []
+    for input_path in input_paths:
+        for source, text in read_corpus_files(input_path):
+            source_chunks = chunk_text(text, chunk_size=chunk_size, overlap=overlap)
+            for chunk in source_chunks:
+                chunks.append(
+                    DocumentChunk(
+                        id=len(chunks),
+                        source=source,
+                        text=chunk,
+                    )
+                )
+    return chunks
+
+
 class FaissKnowledgeBase:
     """A small local vector store backed by FAISS."""
 
@@ -99,10 +119,12 @@ class FaissKnowledgeBase:
         index_dir: str | Path = DEFAULT_INDEX_DIR,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
         batch_size: int = 32,
+        device: str | None = None,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
         self.batch_size = batch_size
+        self.device = device
         self._model = None
         self._index = None
         self._metadata: list[dict[str, Any]] | None = None
@@ -114,7 +136,7 @@ class FaissKnowledgeBase:
     def _encoder(self):
         if self._model is None:
             SentenceTransformer = _load_sentence_transformer()
-            self._model = SentenceTransformer(self.embedding_model)
+            self._model = SentenceTransformer(self.embedding_model, device=self.device)
         return self._model
 
     def encode(self, texts: list[str]) -> np.ndarray:
@@ -128,9 +150,21 @@ class FaissKnowledgeBase:
         return embeddings.astype("float32")
 
     def build(self, input_path: str | Path, chunk_size: int, overlap: int) -> int:
-        chunks = build_chunks(input_path, chunk_size=chunk_size, overlap=overlap)
+        return self.build_from_sources([input_path], chunk_size=chunk_size, overlap=overlap)
+
+    def build_from_sources(
+        self,
+        input_paths: Iterable[str | Path],
+        chunk_size: int,
+        overlap: int,
+    ) -> int:
+        chunks = build_chunks_from_sources(
+            input_paths,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
         if not chunks:
-            raise RuntimeError(f"No text chunks found under {input_path}")
+            raise RuntimeError("No text chunks found in the configured knowledge-base sources.")
 
         embeddings = self.encode([chunk.text for chunk in chunks])
         self.save(embeddings, chunks)

@@ -203,6 +203,10 @@ data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数�
 
 当前项目支持把 `.txt/.md/.csv/.json/.jsonl` 放入 `data/processed` 参与建库。其中 JSON 问答数据会自动转成“来源/问题/答案”的可检索文本。
 
+后端启动时还会把 `data/finetune/sft_dataset_clean.json` 一并加入知识库。
+该文件保持在微调目录中，不需要复制到 `data/processed`。每条
+`instruction/input/output` 记录会被转换为带来源的“问题 + 答案”检索文本。
+
 如果你把原始文本放在 `data/raw`，先同步清洗到 `data/processed`：
 
 ```bash
@@ -224,6 +228,20 @@ python embeddings/embed_utils.py query "你的问题" --top_k 5
 ```
 
 FAISS 索引会保存到 `embeddings/faiss_index`，构建完成后可以反复直接使用，不需要每次启动都重建。只有当你新增、删除或修改 `data/processed` 中的语料后，才需要重新运行 build 命令。
+
+当前 `.env.example` 为排查 Windows FAISS 问题，默认启用了启动重建：
+
+```env
+EMBEDDING_DEVICE=cpu
+FINETUNE_DATASET_PATH=data/finetune/sft_dataset_clean.json
+REBUILD_KNOWLEDGE_BASE_ON_STARTUP=true
+KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
+```
+
+启动顺序为：使用 CPU embedding 重建知识库、执行一次检索自检、加载基础模型、
+挂载 LoRA、开始接受请求。CPU embedding 可以避免 SentenceTransformer 与 9B 模型
+争抢 CUDA 显存。确认索引稳定后，可以把
+`REBUILD_KNOWLEDGE_BASE_ON_STARTUP` 改为 `false`，以后仅在语料变化时手动重建。
 
 ## 数据集格式
 

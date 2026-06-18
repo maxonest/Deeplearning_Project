@@ -33,9 +33,13 @@ class Settings(BaseSettings):
     dataset_path: Path = PROJECT_ROOT / "data" / "dataset.json"
     raw_data_dir: Path = PROJECT_ROOT / "data" / "raw"
     processed_data_dir: Path = PROJECT_ROOT / "data" / "processed"
+    finetune_dataset_path: Path = PROJECT_ROOT / "data" / "finetune" / "sft_dataset_clean.json"
 
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    embedding_device: str = "cpu"
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
+    rebuild_knowledge_base_on_startup: bool = True
+    knowledge_base_self_test_query: str = "什么是体适能？"
     chunk_size: int = 600
     chunk_overlap: int = 80
     default_top_k: int = 5
@@ -74,6 +78,7 @@ class Settings(BaseSettings):
         "dataset_path",
         "raw_data_dir",
         "processed_data_dir",
+        "finetune_dataset_path",
         "faiss_index_dir",
         "local_model_path",
         "local_lora_adapter_path",

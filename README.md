@@ -247,6 +247,8 @@ RETRIEVAL_FAILURE_FALLBACK=true
 
 系统会对语料内容、embedding 模型和切块参数计算指纹。只有这些内容发生变化、
 索引不存在或索引校验失败时才重建；未变化时直接复用持久化 FAISS 索引。
+旧版本 `metadata.json` 没有 `format_version` 时会被视为不可用索引并强制重建，
+即使 `REBUILD_KNOWLEDGE_BASE_ON_STARTUP=false` 也不会继续使用旧格式索引。
 
 FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免与加载到 CUDA
 的 9B 模型共享同一组原生运行库。即使检索子进程发生 Windows 原生崩溃，FastAPI
@@ -255,6 +257,8 @@ FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免
 
 `/health` 会返回 `knowledge_base_ready`、`knowledge_base_chunks` 和
 `knowledge_base_error`。检索不可用但模型仍可回答时，健康状态为 `degraded`。
+如果启动重建失败，当前进程会熔断知识库检索，不会在每个专业问题上重复加载同一个
+损坏索引；修复语料或环境后重启后端即可重新尝试。
 
 启动顺序为：检查或更新知识库、执行检索自检、加载基础模型、挂载 LoRA、开始接受
 请求。设置 `REBUILD_KNOWLEDGE_BASE_ON_STARTUP=false` 后，不再自动更新过期索引，

@@ -53,8 +53,27 @@ def rebuild_knowledge_base() -> None:
 
     retriever = rag_pipeline.retriever
     try:
-        should_rebuild = False
-        if settings.rebuild_knowledge_base_on_startup:
+        load = getattr(retriever, "load", None)
+        rebuild = getattr(retriever, "rebuild", None)
+        if load is None:
+            raise RuntimeError("The configured retriever does not support index validation.")
+        if rebuild is None:
+            raise RuntimeError("The configured retriever does not support rebuilding.")
+
+        index_info = None
+        invalid_index_error = None
+        try:
+            index_info = load()
+        except Exception as exc:
+            invalid_index_error = exc
+            logger.warning(
+                "Existing knowledge-base index is missing or incompatible and must be rebuilt: %s",
+                exc,
+            )
+
+        should_rebuild = invalid_index_error is not None
+        rebuild_reason = "missing, legacy, or incompatible index"
+        if not should_rebuild and settings.rebuild_knowledge_base_on_startup:
             needs_rebuild = getattr(retriever, "needs_rebuild", None)
             if needs_rebuild is None:
                 raise RuntimeError("The configured retriever cannot check index freshness.")
@@ -63,18 +82,17 @@ def rebuild_knowledge_base() -> None:
                 chunk_size=settings.chunk_size,
                 overlap=settings.chunk_overlap,
             )
+            rebuild_reason = "source content or indexing configuration changed"
 
         if should_rebuild:
             logger.info(
-                "Knowledge-base stage 1/3: source or configuration changed; rebuilding "
+                "Knowledge-base stage 1/3: %s; rebuilding "
                 "from sources=%s, embedding_model=%s, device=%s",
+                rebuild_reason,
                 [str(source) for source in sources],
                 settings.embedding_model,
                 settings.embedding_device,
             )
-            rebuild = getattr(retriever, "rebuild", None)
-            if rebuild is None:
-                raise RuntimeError("The configured retriever does not support rebuilding.")
             chunk_count = rebuild(
                 input_paths=sources,
                 chunk_size=settings.chunk_size,
@@ -87,42 +105,21 @@ def rebuild_knowledge_base() -> None:
             )
         else:
             logger.info("Knowledge-base stage 1/3: existing index is current; skipping rebuild.")
-            load = getattr(retriever, "load", None)
-            if load is None:
-                raise RuntimeError("The configured retriever does not support index validation.")
-            try:
-                index_info = load()
-                chunk_count = int(index_info.get("count", 0))
-                logger.info(
-                    "Knowledge-base stage 2/3: validated existing index with %s chunks.",
-                    chunk_count,
-                )
-            except Exception:
-                if not settings.rebuild_knowledge_base_on_startup:
-                    raise
-                logger.exception(
-                    "Existing knowledge-base index is invalid; rebuilding it once."
-                )
-                rebuild = getattr(retriever, "rebuild", None)
-                if rebuild is None:
-                    raise RuntimeError("The configured retriever does not support rebuilding.")
-                chunk_count = rebuild(
-                    input_paths=sources,
-                    chunk_size=settings.chunk_size,
-                    overlap=settings.chunk_overlap,
-                )
-                logger.info(
-                    "Knowledge-base stage 2/3: rebuilt invalid index with %s chunks.",
-                    chunk_count,
-                )
+            assert index_info is not None
+            chunk_count = int(index_info.get("count", 0))
+            logger.info(
+                "Knowledge-base stage 2/3: validated existing index with %s chunks.",
+                chunk_count,
+            )
 
         startup_state["knowledge_base_chunks"] = chunk_count
         hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
         if not hits:
             raise RuntimeError(
                 "Knowledge-base self-test returned no results after loading the index."
-            )
+        )
         startup_state["knowledge_base_ready"] = True
+        rag_pipeline.enable_retrieval()
         logger.info(
             "Knowledge-base stage 3/3: self-test succeeded. query=%r, source=%s",
             settings.knowledge_base_self_test_query,
@@ -130,6 +127,7 @@ def rebuild_knowledge_base() -> None:
         )
     except Exception as exc:
         startup_state["knowledge_base_error"] = f"{type(exc).__name__}: {exc}"
+        rag_pipeline.disable_retrieval(startup_state["knowledge_base_error"])
         logger.exception("Knowledge-base startup preparation failed.")
         if not settings.retrieval_failure_fallback:
             raise

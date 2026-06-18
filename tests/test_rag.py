@@ -52,3 +52,15 @@ def test_retrieval_failure_falls_back_to_empty_documents(monkeypatch):
     pipeline = RAGPipeline(llm_client=FakeLLM(), retriever=retriever)
 
     assert pipeline.retrieve("专业问题", top_k=1) == []
+
+
+def test_disabled_retrieval_does_not_call_worker():
+    retriever = FakeRetriever()
+    retriever.search = lambda query, top_k: (_ for _ in ()).throw(
+        AssertionError("worker should not be called")
+    )
+    pipeline = RAGPipeline(llm_client=FakeLLM(), retriever=retriever)
+
+    pipeline.disable_retrieval("startup rebuild failed")
+
+    assert pipeline.retrieve("专业问题", top_k=1) == []

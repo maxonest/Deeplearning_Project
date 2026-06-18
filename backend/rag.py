@@ -267,8 +267,21 @@ class RAGPipeline:
                 faiss_threads=settings.faiss_threads,
             )
         self.max_context_chars = max_context_chars
+        self._retrieval_enabled = True
+        self._retrieval_disabled_reason: str | None = None
+
+    def enable_retrieval(self) -> None:
+        self._retrieval_enabled = True
+        self._retrieval_disabled_reason = None
+
+    def disable_retrieval(self, reason: str) -> None:
+        self._retrieval_enabled = False
+        self._retrieval_disabled_reason = reason
+        logger.error("Knowledge-base retrieval disabled: %s", reason)
 
     def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
+        if not self._retrieval_enabled:
+            return []
         try:
             return self.retriever.search(query, top_k=top_k)
         except Exception:

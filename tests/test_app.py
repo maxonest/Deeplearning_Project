@@ -19,6 +19,7 @@ class FakePipeline:
         self.llm_client = FakeLLM()
         self.retriever = FakeRetriever()
         self.last_memory_context = None
+        self.retrieval_enabled = True
 
     def answer(
         self,
@@ -33,6 +34,12 @@ class FakePipeline:
             "documents": [{"id": 0, "source": "fake", "text": memory_context, "score": 1.0}],
             "prompt": "prompt",
         }
+
+    def enable_retrieval(self):
+        self.retrieval_enabled = True
+
+    def disable_retrieval(self, reason):
+        self.retrieval_enabled = False
 
 
 class FakeRetriever:
@@ -114,6 +121,64 @@ def test_rebuild_knowledge_base_includes_finetune_dataset(monkeypatch, tmp_path)
     assert pipeline.retriever.rebuild_sources == [processed_dir, finetune_path]
     assert app_module.startup_state["knowledge_base_ready"] is True
     assert app_module.startup_state["knowledge_base_chunks"] == 12
+
+
+def test_invalid_legacy_index_is_rebuilt_even_when_auto_update_is_disabled(monkeypatch, tmp_path):
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    pipeline = FakePipeline()
+    rebuild_calls = []
+
+    monkeypatch.setattr(
+        pipeline.retriever,
+        "load",
+        lambda: (_ for _ in ()).throw(
+            RuntimeError("Unsupported FAISS metadata format: None")
+        ),
+    )
+    monkeypatch.setattr(
+        pipeline.retriever,
+        "rebuild",
+        lambda input_paths, chunk_size, overlap: rebuild_calls.append(input_paths) or 8,
+    )
+    monkeypatch.setattr(app_module.settings, "rebuild_knowledge_base_on_startup", False)
+    monkeypatch.setattr(app_module.settings, "processed_data_dir", processed_dir)
+    monkeypatch.setattr(app_module.settings, "finetune_dataset_path", tmp_path / "missing.json")
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+
+    app_module.rebuild_knowledge_base()
+
+    assert rebuild_calls == [[processed_dir]]
+    assert app_module.startup_state["knowledge_base_ready"] is True
+    assert pipeline.retrieval_enabled is True
+
+
+def test_failed_rebuild_disables_repeated_retrieval(monkeypatch, tmp_path):
+    processed_dir = tmp_path / "processed"
+    processed_dir.mkdir()
+    pipeline = FakePipeline()
+
+    monkeypatch.setattr(
+        pipeline.retriever,
+        "load",
+        lambda: (_ for _ in ()).throw(RuntimeError("legacy index")),
+    )
+    monkeypatch.setattr(
+        pipeline.retriever,
+        "rebuild",
+        lambda input_paths, chunk_size, overlap: (_ for _ in ()).throw(
+            RuntimeError("rebuild failed")
+        ),
+    )
+    monkeypatch.setattr(app_module.settings, "retrieval_failure_fallback", True)
+    monkeypatch.setattr(app_module.settings, "processed_data_dir", processed_dir)
+    monkeypatch.setattr(app_module.settings, "finetune_dataset_path", tmp_path / "missing.json")
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+
+    app_module.rebuild_knowledge_base()
+
+    assert pipeline.retrieval_enabled is False
+    assert "rebuild failed" in app_module.startup_state["knowledge_base_error"]
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):

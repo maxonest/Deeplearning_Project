@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from threading import Thread
+from threading import RLock, Thread
 from typing import Iterator
 from typing import Protocol
 
@@ -65,12 +65,18 @@ class TransformersLLMClient:
         self._tokenizer = None
         self._model = None
         self._torch = None
+        self._load_lock = RLock()
+        self._generation_lock = RLock()
 
     @property
     def is_loaded(self) -> bool:
         return self._model is not None and self._tokenizer is not None
 
     def load(self) -> None:
+        with self._load_lock:
+            self._load_unlocked()
+
+    def _load_unlocked(self) -> None:
         if self.is_loaded:
             return
         logger.info(
@@ -199,38 +205,40 @@ class TransformersLLMClient:
         return inputs, generation_kwargs
 
     def generate(self, prompt: str, enable_thinking: bool | None = None) -> str:
-        inputs, generation_kwargs = self._build_generation_inputs(prompt, enable_thinking=enable_thinking)
-        assert self._torch is not None
-        assert self._model is not None
-        assert self._tokenizer is not None
+        with self._generation_lock:
+            inputs, generation_kwargs = self._build_generation_inputs(prompt, enable_thinking=enable_thinking)
+            assert self._torch is not None
+            assert self._model is not None
+            assert self._tokenizer is not None
 
-        with self._torch.inference_mode():
-            output_ids = self._model.generate(**inputs, **generation_kwargs)
+            with self._torch.inference_mode():
+                output_ids = self._model.generate(**inputs, **generation_kwargs)
 
-        new_tokens = output_ids[0][inputs["input_ids"].shape[-1] :]
-        return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+            new_tokens = output_ids[0][inputs["input_ids"].shape[-1] :]
+            return self._tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
 
     def stream_generate(self, prompt: str, enable_thinking: bool | None = None) -> Iterator[str]:
-        inputs, generation_kwargs = self._build_generation_inputs(prompt, enable_thinking=enable_thinking)
-        assert self._model is not None
-        assert self._tokenizer is not None
+        with self._generation_lock:
+            inputs, generation_kwargs = self._build_generation_inputs(prompt, enable_thinking=enable_thinking)
+            assert self._model is not None
+            assert self._tokenizer is not None
 
-        from transformers import TextIteratorStreamer
+            from transformers import TextIteratorStreamer
 
-        streamer = TextIteratorStreamer(
-            self._tokenizer,
-            skip_prompt=True,
-            skip_special_tokens=True,
-            timeout=60,
-        )
-        generation_kwargs["streamer"] = streamer
-        thread = Thread(target=self._model.generate, kwargs={**inputs, **generation_kwargs}, daemon=True)
-        thread.start()
+            streamer = TextIteratorStreamer(
+                self._tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+                timeout=60,
+            )
+            generation_kwargs["streamer"] = streamer
+            thread = Thread(target=self._model.generate, kwargs={**inputs, **generation_kwargs}, daemon=True)
+            thread.start()
 
-        for text in streamer:
-            if text:
-                yield text
-        thread.join()
+            for text in streamer:
+                if text:
+                    yield text
+            thread.join()
 
 
 def build_llm_client(

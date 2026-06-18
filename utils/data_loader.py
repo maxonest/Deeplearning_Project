@@ -137,8 +137,8 @@ def read_corpus_files(input_path: str | Path) -> list[tuple[str, str]]:
         if suffix in {".json", ".jsonl"}:
             try:
                 records = load_json_records(file_path)
-            except (json.JSONDecodeError, ValueError):
-                continue
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(f"Failed to parse corpus dataset: {file_path}") from exc
             for index, record in enumerate(records):
                 text = record_to_corpus_text(record)
                 if text:

@@ -71,3 +71,11 @@ def test_read_corpus_files_supports_json_dataset(tmp_path):
     assert len(docs) == 1
     assert "运动前要热身吗" in docs[0][1]
     assert "建议热身" in docs[0][1]
+
+
+def test_read_corpus_files_reports_invalid_json(tmp_path):
+    path = tmp_path / "broken.json"
+    path.write_text("{invalid", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="broken.json"):
+        read_corpus_files(path)

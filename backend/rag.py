@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import subprocess
+import sys
 from pathlib import Path
+from threading import RLock
 from typing import Any, Iterator, Protocol
 
 from backend.llm import LLMClient, build_llm_client
 from utils.config import settings
+
+
+logger = logging.getLogger("uvicorn.error")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class Retriever(Protocol):
@@ -22,10 +31,14 @@ class FaissRetriever:
         index_dir: str | Path,
         embedding_model: str,
         embedding_device: str | None = None,
+        embedding_batch_size: int = 32,
+        faiss_threads: int = 1,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
         self.embedding_device = embedding_device
+        self.embedding_batch_size = embedding_batch_size
+        self.faiss_threads = faiss_threads
         self._kb = None
 
     @property
@@ -40,6 +53,8 @@ class FaissRetriever:
                 index_dir=self.index_dir,
                 embedding_model=self.embedding_model,
                 device=self.embedding_device,
+                batch_size=self.embedding_batch_size,
+                faiss_threads=self.faiss_threads,
             )
         return self._kb
 
@@ -55,10 +70,168 @@ class FaissRetriever:
             overlap=overlap,
         )
 
+    def needs_rebuild(
+        self,
+        input_paths: list[str | Path],
+        chunk_size: int,
+        overlap: int,
+    ) -> bool:
+        return self._knowledge_base().needs_rebuild(
+            input_paths,
+            chunk_size=chunk_size,
+            overlap=overlap,
+        )
+
+    def load(self) -> dict[str, int]:
+        knowledge_base = self._knowledge_base()
+        knowledge_base.load()
+        return knowledge_base.index_info()
+
+    def close(self) -> None:
+        return
+
     def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
         if not self.exists:
             return []
         return self._knowledge_base().search(query, top_k=top_k)
+
+
+class IsolatedFaissRetriever:
+    """Keep FAISS and sentence-transformers outside the model process."""
+
+    def __init__(
+        self,
+        index_dir: str | Path,
+        embedding_model: str,
+        embedding_device: str | None = "cpu",
+        embedding_batch_size: int = 32,
+        faiss_threads: int = 1,
+    ) -> None:
+        self.index_dir = Path(index_dir)
+        self.embedding_model = embedding_model
+        self.embedding_device = embedding_device or "cpu"
+        self.embedding_batch_size = embedding_batch_size
+        self.faiss_threads = faiss_threads
+        self._process: subprocess.Popen | None = None
+        self._lock = RLock()
+
+    @property
+    def exists(self) -> bool:
+        return (self.index_dir / "index.faiss").exists() and (self.index_dir / "metadata.json").exists()
+
+    def _start(self) -> subprocess.Popen:
+        if self._process is not None and self._process.poll() is None:
+            return self._process
+
+        worker_path = PROJECT_ROOT / "embeddings" / "retrieval_worker.py"
+        command = [
+            sys.executable,
+            "-X",
+            "faulthandler",
+            "-u",
+            str(worker_path),
+            "--index",
+            str(self.index_dir),
+            "--model",
+            self.embedding_model,
+            "--device",
+            self.embedding_device,
+            "--batch-size",
+            str(self.embedding_batch_size),
+            "--faiss-threads",
+            str(self.faiss_threads),
+        ]
+        logger.info("Starting isolated retrieval worker.")
+        self._process = subprocess.Popen(
+            command,
+            cwd=str(PROJECT_ROOT),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        return self._process
+
+    def _request(self, command: str, **payload):
+        with self._lock:
+            process = self._start()
+            if process.stdin is None or process.stdout is None:
+                raise RuntimeError("Retrieval worker pipes are unavailable.")
+            request = {"command": command, **payload}
+            try:
+                process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+                process.stdin.flush()
+                response_line = process.stdout.readline()
+            except (BrokenPipeError, OSError) as exc:
+                raise RuntimeError("Retrieval worker communication failed.") from exc
+
+            if not response_line:
+                return_code = process.poll()
+                self._process = None
+                raise RuntimeError(
+                    "Retrieval worker exited unexpectedly"
+                    + (f" with code {return_code}" if return_code is not None else "")
+                    + ". The API process remains available."
+                )
+            response = json.loads(response_line)
+            if not response.get("ok"):
+                raise RuntimeError(response.get("error", "Retrieval worker failed."))
+            return response.get("result")
+
+    def rebuild(
+        self,
+        input_paths: list[str | Path],
+        chunk_size: int,
+        overlap: int,
+    ) -> int:
+        return int(
+            self._request(
+                "rebuild",
+                input_paths=[str(path) for path in input_paths],
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
+        )
+
+    def needs_rebuild(
+        self,
+        input_paths: list[str | Path],
+        chunk_size: int,
+        overlap: int,
+    ) -> bool:
+        return bool(
+            self._request(
+                "needs_rebuild",
+                input_paths=[str(path) for path in input_paths],
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
+        )
+
+    def load(self) -> dict[str, int]:
+        return dict(self._request("load"))
+
+    def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
+        if not self.exists:
+            return []
+        return list(self._request("search", query=query, top_k=top_k))
+
+    def close(self) -> None:
+        with self._lock:
+            process = self._process
+            self._process = None
+            if process is None or process.poll() is not None:
+                return
+            try:
+                if process.stdin is not None:
+                    process.stdin.write('{"command":"shutdown"}\n')
+                    process.stdin.flush()
+                process.wait(timeout=5)
+            except Exception:
+                process.terminate()
 
 
 class RAGPipeline:
@@ -78,15 +251,31 @@ class RAGPipeline:
             enable_thinking=settings.local_model_enable_thinking,
             local_files_only=settings.local_files_only,
         )
-        self.retriever = retriever or FaissRetriever(
-            index_dir=settings.faiss_index_dir,
-            embedding_model=settings.embedding_model,
-            embedding_device=settings.embedding_device,
-        )
+        if retriever is not None:
+            self.retriever = retriever
+        else:
+            retriever_class = (
+                IsolatedFaissRetriever
+                if settings.isolate_retrieval_process
+                else FaissRetriever
+            )
+            self.retriever = retriever_class(
+                index_dir=settings.faiss_index_dir,
+                embedding_model=settings.embedding_model,
+                embedding_device=settings.embedding_device,
+                embedding_batch_size=settings.embedding_batch_size,
+                faiss_threads=settings.faiss_threads,
+            )
         self.max_context_chars = max_context_chars
 
     def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
-        return self.retriever.search(query, top_k=top_k)
+        try:
+            return self.retriever.search(query, top_k=top_k)
+        except Exception:
+            logger.exception("Knowledge-base retrieval failed.")
+            if settings.retrieval_failure_fallback:
+                return []
+            raise
 
     @staticmethod
     def is_small_talk(question: str) -> bool:
@@ -149,7 +338,7 @@ class RAGPipeline:
         memory_budget = max(1000, self.max_context_chars // 3)
         retrieval_budget = max(1000, self.max_context_chars - memory_budget)
         memory = (memory_context or "暂无")[-memory_budget:]
-        retrieved_context = retrieved_context[-retrieval_budget:]
+        retrieved_context = retrieved_context[:retrieval_budget]
         thinking_instruction = (
             "如果启用深度思考，请在 <think></think> 中使用中文进行思考，最终回答也使用中文。\n"
             if enable_thinking

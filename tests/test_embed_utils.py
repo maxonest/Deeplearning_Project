@@ -1,6 +1,6 @@
 import json
 
-from embeddings.embed_utils import build_chunks_from_sources
+from embeddings.embed_utils import build_chunks_from_sources, build_source_signature
 
 
 def test_build_chunks_from_sources_includes_sft_dataset(tmp_path):
@@ -34,3 +34,26 @@ def test_build_chunks_from_sources_includes_sft_dataset(tmp_path):
     assert chunks[1].id == 1
     assert "什么是体适能" in chunks[1].text
     assert "体适能是完成体力活动" in chunks[1].text
+
+
+def test_source_signature_changes_with_corpus_content(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    source = corpus / "manual.txt"
+    source.write_text("第一版", encoding="utf-8")
+
+    first = build_source_signature(
+        [corpus],
+        embedding_model="test-model",
+        chunk_size=600,
+        overlap=80,
+    )
+    source.write_text("第二版", encoding="utf-8")
+    second = build_source_signature(
+        [corpus],
+        embedding_model="test-model",
+        chunk_size=600,
+        overlap=80,
+    )
+
+    assert first != second

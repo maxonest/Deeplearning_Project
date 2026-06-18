@@ -34,22 +34,14 @@ rag_pipeline = RAGPipeline()
 startup_state = {
     "knowledge_base_ready": False,
     "knowledge_base_chunks": 0,
+    "knowledge_base_error": None,
 }
 
 
 def rebuild_knowledge_base() -> None:
     startup_state["knowledge_base_ready"] = False
     startup_state["knowledge_base_chunks"] = 0
-    if not settings.rebuild_knowledge_base_on_startup:
-        startup_state["knowledge_base_ready"] = bool(
-            getattr(rag_pipeline.retriever, "exists", False)
-        )
-        logger.info(
-            "Knowledge-base startup rebuild is disabled. existing_index=%s",
-            startup_state["knowledge_base_ready"],
-        )
-        return
-
+    startup_state["knowledge_base_error"] = None
     sources = [settings.processed_data_dir]
     if settings.finetune_dataset_path.is_file():
         sources.append(settings.finetune_dataset_path)
@@ -59,39 +51,91 @@ def rebuild_knowledge_base() -> None:
             settings.finetune_dataset_path,
         )
 
-    logger.info(
-        "Knowledge-base stage 1/3: rebuilding from sources=%s, embedding_model=%s, device=%s",
-        [str(source) for source in sources],
-        settings.embedding_model,
-        settings.embedding_device,
-    )
     retriever = rag_pipeline.retriever
-    rebuild = getattr(retriever, "rebuild", None)
-    if rebuild is None:
-        raise RuntimeError("The configured retriever does not support startup rebuilding.")
-    chunk_count = rebuild(
-        input_paths=sources,
-        chunk_size=settings.chunk_size,
-        overlap=settings.chunk_overlap,
-    )
-    startup_state["knowledge_base_chunks"] = chunk_count
-    logger.info(
-        "Knowledge-base stage 2/3: saved %s chunks to %s",
-        chunk_count,
-        settings.faiss_index_dir,
-    )
+    try:
+        should_rebuild = False
+        if settings.rebuild_knowledge_base_on_startup:
+            needs_rebuild = getattr(retriever, "needs_rebuild", None)
+            if needs_rebuild is None:
+                raise RuntimeError("The configured retriever cannot check index freshness.")
+            should_rebuild = needs_rebuild(
+                input_paths=sources,
+                chunk_size=settings.chunk_size,
+                overlap=settings.chunk_overlap,
+            )
 
-    hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
-    if not hits:
-        raise RuntimeError(
-            "Knowledge-base self-test returned no results after rebuilding the index."
+        if should_rebuild:
+            logger.info(
+                "Knowledge-base stage 1/3: source or configuration changed; rebuilding "
+                "from sources=%s, embedding_model=%s, device=%s",
+                [str(source) for source in sources],
+                settings.embedding_model,
+                settings.embedding_device,
+            )
+            rebuild = getattr(retriever, "rebuild", None)
+            if rebuild is None:
+                raise RuntimeError("The configured retriever does not support rebuilding.")
+            chunk_count = rebuild(
+                input_paths=sources,
+                chunk_size=settings.chunk_size,
+                overlap=settings.chunk_overlap,
+            )
+            logger.info(
+                "Knowledge-base stage 2/3: saved %s chunks to %s",
+                chunk_count,
+                settings.faiss_index_dir,
+            )
+        else:
+            logger.info("Knowledge-base stage 1/3: existing index is current; skipping rebuild.")
+            load = getattr(retriever, "load", None)
+            if load is None:
+                raise RuntimeError("The configured retriever does not support index validation.")
+            try:
+                index_info = load()
+                chunk_count = int(index_info.get("count", 0))
+                logger.info(
+                    "Knowledge-base stage 2/3: validated existing index with %s chunks.",
+                    chunk_count,
+                )
+            except Exception:
+                if not settings.rebuild_knowledge_base_on_startup:
+                    raise
+                logger.exception(
+                    "Existing knowledge-base index is invalid; rebuilding it once."
+                )
+                rebuild = getattr(retriever, "rebuild", None)
+                if rebuild is None:
+                    raise RuntimeError("The configured retriever does not support rebuilding.")
+                chunk_count = rebuild(
+                    input_paths=sources,
+                    chunk_size=settings.chunk_size,
+                    overlap=settings.chunk_overlap,
+                )
+                logger.info(
+                    "Knowledge-base stage 2/3: rebuilt invalid index with %s chunks.",
+                    chunk_count,
+                )
+
+        startup_state["knowledge_base_chunks"] = chunk_count
+        hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
+        if not hits:
+            raise RuntimeError(
+                "Knowledge-base self-test returned no results after loading the index."
+            )
+        startup_state["knowledge_base_ready"] = True
+        logger.info(
+            "Knowledge-base stage 3/3: self-test succeeded. query=%r, source=%s",
+            settings.knowledge_base_self_test_query,
+            hits[0].get("source", "unknown"),
         )
-    startup_state["knowledge_base_ready"] = True
-    logger.info(
-        "Knowledge-base stage 3/3: self-test succeeded. query=%r, source=%s",
-        settings.knowledge_base_self_test_query,
-        hits[0].get("source", "unknown"),
-    )
+    except Exception as exc:
+        startup_state["knowledge_base_error"] = f"{type(exc).__name__}: {exc}"
+        logger.exception("Knowledge-base startup preparation failed.")
+        if not settings.retrieval_failure_fallback:
+            raise
+        logger.warning(
+            "Continuing without retrieval because RETRIEVAL_FAILURE_FALLBACK=true."
+        )
 
 
 def preload_local_model() -> None:
@@ -116,7 +160,12 @@ def preload_local_model() -> None:
 async def lifespan(_: FastAPI):
     rebuild_knowledge_base()
     preload_local_model()
-    yield
+    try:
+        yield
+    finally:
+        close_retriever = getattr(rag_pipeline.retriever, "close", None)
+        if close_retriever is not None:
+            close_retriever()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
@@ -133,11 +182,12 @@ app.add_middleware(
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(
-        status="ok",
+        status="ok" if startup_state["knowledge_base_ready"] else "degraded",
         use_local_model=settings.use_local_model,
         model_loaded=bool(getattr(rag_pipeline.llm_client, "is_loaded", False)),
         knowledge_base_ready=bool(startup_state["knowledge_base_ready"]),
         knowledge_base_chunks=int(startup_state["knowledge_base_chunks"]),
+        knowledge_base_error=startup_state["knowledge_base_error"],
         local_model_path=str(settings.local_model_path),
         local_lora_adapter_path=(
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
@@ -192,10 +242,11 @@ def chat(request: ChatRequest) -> ChatResponse:
     if not memory.has_session(session_id):
         memory.clear(session_id)
 
+    memory_context = memory.build_context(session_id)
     memory.add_message(session_id, "user", request.question)
     result = rag_pipeline.answer(
         question=request.question,
-        memory_context=memory.build_context(session_id),
+        memory_context=memory_context,
         top_k=request.top_k,
         enable_thinking=request.enable_thinking,
     )
@@ -221,13 +272,14 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
         if not memory.has_session(session_id):
             memory.clear(session_id)
 
+        memory_context = memory.build_context(session_id)
         memory.add_message(session_id, "user", request.question)
         answer_parts: list[str] = []
 
         try:
             documents, chunks = rag_pipeline.stream_answer(
                 question=request.question,
-                memory_context=memory.build_context(session_id),
+                memory_context=memory_context,
                 top_k=request.top_k,
                 enable_thinking=request.enable_thinking,
             )
@@ -239,6 +291,7 @@ def chat_stream(request: ChatRequest) -> StreamingResponse:
             memory.add_message(session_id, "assistant", answer)
             yield sse_event("done", {"answer": answer})
         except Exception as exc:
+            logger.exception("Streaming chat request failed.")
             yield sse_event("error", {"message": str(exc)})
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

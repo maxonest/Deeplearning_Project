@@ -109,6 +109,9 @@ def main() -> None:
     env.setdefault("PYTHONFAULTHANDLER", "1")
     env.setdefault("PYTHONUNBUFFERED", "1")
     env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("OMP_NUM_THREADS", "1")
+    env.setdefault("MKL_NUM_THREADS", "1")
+    env.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     npm = None
     if not args.backend_only:

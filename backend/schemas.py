@@ -15,6 +15,7 @@ class HealthResponse(BaseModel):
     model_loaded: bool
     knowledge_base_ready: bool
     knowledge_base_chunks: int
+    knowledge_base_error: str | None
     local_model_path: str
     local_lora_adapter_path: str | None
 

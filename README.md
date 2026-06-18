@@ -229,19 +229,33 @@ python embeddings/embed_utils.py query "你的问题" --top_k 5
 
 FAISS 索引会保存到 `embeddings/faiss_index`，构建完成后可以反复直接使用，不需要每次启动都重建。只有当你新增、删除或修改 `data/processed` 中的语料后，才需要重新运行 build 命令。
 
-当前 `.env.example` 为排查 Windows FAISS 问题，默认启用了启动重建：
+当前 `.env.example` 会在启动时检查知识库是否过期：
 
 ```env
 EMBEDDING_DEVICE=cpu
+EMBEDDING_BATCH_SIZE=32
+FAISS_THREADS=1
 FINETUNE_DATASET_PATH=data/finetune/sft_dataset_clean.json
 REBUILD_KNOWLEDGE_BASE_ON_STARTUP=true
 KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
+ISOLATE_RETRIEVAL_PROCESS=true
+RETRIEVAL_FAILURE_FALLBACK=true
 ```
 
-启动顺序为：使用 CPU embedding 重建知识库、执行一次检索自检、加载基础模型、
-挂载 LoRA、开始接受请求。CPU embedding 可以避免 SentenceTransformer 与 9B 模型
-争抢 CUDA 显存。确认索引稳定后，可以把
-`REBUILD_KNOWLEDGE_BASE_ON_STARTUP` 改为 `false`，以后仅在语料变化时手动重建。
+系统会对语料内容、embedding 模型和切块参数计算指纹。只有这些内容发生变化、
+索引不存在或索引校验失败时才重建；未变化时直接复用持久化 FAISS 索引。
+
+FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免与加载到 CUDA
+的 9B 模型共享同一组原生运行库。即使检索子进程发生 Windows 原生崩溃，FastAPI
+主进程仍能继续运行；当 `RETRIEVAL_FAILURE_FALLBACK=true` 时，本次请求会退化为
+不带知识库文档的模型回答，并在后端日志中记录检索异常。
+
+`/health` 会返回 `knowledge_base_ready`、`knowledge_base_chunks` 和
+`knowledge_base_error`。检索不可用但模型仍可回答时，健康状态为 `degraded`。
+
+启动顺序为：检查或更新知识库、执行检索自检、加载基础模型、挂载 LoRA、开始接受
+请求。设置 `REBUILD_KNOWLEDGE_BASE_ON_STARTUP=false` 后，不再自动更新过期索引，
+但仍会校验并加载现有索引。
 
 ## 数据集格式
 

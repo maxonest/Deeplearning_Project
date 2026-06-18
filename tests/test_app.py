@@ -18,6 +18,7 @@ class FakePipeline:
     def __init__(self):
         self.llm_client = FakeLLM()
         self.retriever = FakeRetriever()
+        self.last_memory_context = None
 
     def answer(
         self,
@@ -26,6 +27,7 @@ class FakePipeline:
         top_k: int = 5,
         enable_thinking: bool | None = None,
     ):
+        self.last_memory_context = memory_context
         return {
             "answer": f"回答:{question}",
             "documents": [{"id": 0, "source": "fake", "text": memory_context, "score": 1.0}],
@@ -44,6 +46,15 @@ class FakeRetriever:
         self.exists = True
         return 12
 
+    def needs_rebuild(self, input_paths, chunk_size, overlap):
+        return True
+
+    def load(self):
+        return {"count": 12, "dimension": 384}
+
+    def close(self):
+        return
+
     def search(self, query, top_k):
         return [{"source": "fake-sft.json#0", "text": "测试", "score": 1.0}]
 
@@ -54,10 +65,11 @@ def test_health_endpoint():
     response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
+    assert response.json()["status"] in {"ok", "degraded"}
     assert "model_loaded" in response.json()
     assert "knowledge_base_ready" in response.json()
     assert "knowledge_base_chunks" in response.json()
+    assert "knowledge_base_error" in response.json()
 
 
 def test_model_endpoint_calls_llm_directly(monkeypatch):
@@ -105,7 +117,8 @@ def test_rebuild_knowledge_base_includes_finetune_dataset(monkeypatch, tmp_path)
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):
-    monkeypatch.setattr(app_module, "rag_pipeline", FakePipeline())
+    pipeline = FakePipeline()
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
     client = TestClient(app_module.app)
 
     response = client.post("/api/chat", json={"question": "测试问题", "top_k": 1})
@@ -115,3 +128,4 @@ def test_chat_endpoint_uses_pipeline(monkeypatch):
     assert payload["answer"] == "回答:测试问题"
     assert payload["session_id"]
     assert payload["documents"][0]["source"] == "fake"
+    assert "测试问题" not in (pipeline.last_memory_context or "")

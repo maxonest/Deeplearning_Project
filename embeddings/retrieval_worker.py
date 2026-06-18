@@ -46,6 +46,16 @@ def write_response(payload: dict[str, Any]) -> None:
     PROTOCOL_STDOUT.flush()
 
 
+def write_progress(current: int, total: int) -> None:
+    write_response(
+        {
+            "event": "progress",
+            "current": current,
+            "total": total,
+        }
+    )
+
+
 def main() -> None:
     args = parse_args()
     knowledge_base = FaissKnowledgeBase(
@@ -71,6 +81,7 @@ def main() -> None:
                         request.get("input_paths", []),
                         chunk_size=int(request["chunk_size"]),
                         overlap=int(request["overlap"]),
+                        progress_callback=write_progress,
                     )
                 elif command == "needs_rebuild":
                     result = knowledge_base.needs_rebuild(

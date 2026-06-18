@@ -146,6 +146,13 @@ Windows 后端启动日志会同时写入 `logs/backend_startup.log`。如果后
 
 `start_windows.py` 不会在终端实时输出后端日志；Uvicorn、知识库和模型加载日志只写入
 `logs/backend_startup.log`。终端仅显示服务地址、日志路径和进程退出摘要。
+需要首次构建或更新知识库时，终端会额外显示一条单行刷新的编码进度条，例如：
+
+```text
+Knowledge-base encoding [██████████████░░░░░░░░░░░░░░] 50.00%  3200/6400
+```
+
+索引未变化并被直接复用时不会显示该进度条。
 
 macOS/Linux 可使用：
 

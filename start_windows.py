@@ -21,6 +21,7 @@ ROOT_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = ROOT_DIR / "frontend"
 LOG_DIR = ROOT_DIR / "logs"
 BACKEND_LOG_PATH = LOG_DIR / "backend_startup.log"
+KNOWLEDGE_BASE_PROGRESS_PREFIX = "__KNOWLEDGE_BASE_PROGRESS__"
 
 WINDOWS_EXCEPTION_CODES = {
     0xC0000005: "access violation",
@@ -56,6 +57,30 @@ def stream_process_output(process: subprocess.Popen, log_path: Path) -> None:
         for line in process.stdout:
             log_file.write(line)
             log_file.flush()
+            marker_index = line.find(KNOWLEDGE_BASE_PROGRESS_PREFIX)
+            if marker_index == -1:
+                continue
+            payload = line[marker_index + len(KNOWLEDGE_BASE_PROGRESS_PREFIX) :].strip()
+            try:
+                current_text, total_text = payload.split("|", maxsplit=1)
+                render_knowledge_base_progress(int(current_text), int(total_text))
+            except (TypeError, ValueError):
+                continue
+
+
+def render_knowledge_base_progress(current: int, total: int) -> None:
+    total = max(1, total)
+    current = min(max(0, current), total)
+    width = 28
+    ratio = current / total
+    completed = round(width * ratio)
+    bar = "█" * completed + "░" * (width - completed)
+    ending = "\n" if current >= total else ""
+    print(
+        f"\rKnowledge-base encoding [{bar}] {ratio * 100:6.2f}%  {current}/{total}",
+        end=ending,
+        flush=True,
+    )
 
 
 def start_process(

@@ -1,6 +1,12 @@
 import json
 
-from embeddings.embed_utils import build_chunks_from_sources, build_source_signature
+import numpy as np
+
+from embeddings.embed_utils import (
+    FaissKnowledgeBase,
+    build_chunks_from_sources,
+    build_source_signature,
+)
 
 
 def test_build_chunks_from_sources_includes_sft_dataset(tmp_path):
@@ -57,3 +63,21 @@ def test_source_signature_changes_with_corpus_content(tmp_path):
     )
 
     assert first != second
+
+
+def test_encode_reports_batch_progress():
+    class FakeEncoder:
+        def encode(self, texts, **kwargs):
+            return np.ones((len(texts), 3), dtype="float32")
+
+    knowledge_base = FaissKnowledgeBase(batch_size=2)
+    knowledge_base._model = FakeEncoder()
+    progress = []
+
+    embeddings = knowledge_base.encode(
+        ["a", "b", "c", "d", "e"],
+        progress_callback=lambda current, total: progress.append((current, total)),
+    )
+
+    assert embeddings.shape == (5, 3)
+    assert progress == [(0, 5), (2, 5), (4, 5), (5, 5)]

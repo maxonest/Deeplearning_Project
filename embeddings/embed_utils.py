@@ -14,7 +14,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import numpy as np
 
@@ -201,15 +201,41 @@ class FaissKnowledgeBase:
             faiss.omp_set_num_threads(self.faiss_threads)
         return faiss
 
-    def encode(self, texts: list[str]) -> np.ndarray:
-        embeddings = self._encoder().encode(
-            texts,
-            batch_size=self.batch_size,
-            convert_to_numpy=True,
-            normalize_embeddings=True,
-            show_progress_bar=len(texts) > self.batch_size,
-        )
-        return np.ascontiguousarray(embeddings, dtype="float32")
+    def encode(
+        self,
+        texts: list[str],
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> np.ndarray:
+        if not texts:
+            raise ValueError("texts must not be empty.")
+
+        total = len(texts)
+        if progress_callback is not None:
+            progress_callback(0, total)
+        encoder = self._encoder()
+        if progress_callback is None:
+            embeddings = encoder.encode(
+                texts,
+                batch_size=self.batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            return np.ascontiguousarray(embeddings, dtype="float32")
+
+        batches = []
+        for start in range(0, total, self.batch_size):
+            batch_texts = texts[start : start + self.batch_size]
+            batch_embeddings = encoder.encode(
+                batch_texts,
+                batch_size=self.batch_size,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+            batches.append(np.ascontiguousarray(batch_embeddings, dtype="float32"))
+            progress_callback(min(start + len(batch_texts), total), total)
+        return np.ascontiguousarray(np.concatenate(batches, axis=0), dtype="float32")
 
     def build(self, input_path: str | Path, chunk_size: int, overlap: int) -> int:
         return self.build_from_sources([input_path], chunk_size=chunk_size, overlap=overlap)
@@ -219,6 +245,7 @@ class FaissKnowledgeBase:
         input_paths: Iterable[str | Path],
         chunk_size: int,
         overlap: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> int:
         input_paths = [Path(path) for path in input_paths]
         chunks = build_chunks_from_sources(
@@ -236,7 +263,10 @@ class FaissKnowledgeBase:
             overlap=overlap,
         )
         with self._lock:
-            embeddings = self.encode([chunk.text for chunk in chunks])
+            embeddings = self.encode(
+                [chunk.text for chunk in chunks],
+                progress_callback=progress_callback,
+            )
             self.save(embeddings, chunks, source_signature=source_signature)
         return len(chunks)
 

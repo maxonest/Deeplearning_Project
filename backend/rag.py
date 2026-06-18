@@ -16,6 +16,14 @@ from utils.config import settings
 
 logger = logging.getLogger("uvicorn.error")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+KNOWLEDGE_BASE_PROGRESS_PREFIX = "__KNOWLEDGE_BASE_PROGRESS__"
+
+
+def report_knowledge_base_progress(current: int, total: int) -> None:
+    print(
+        f"{KNOWLEDGE_BASE_PROGRESS_PREFIX}{current}|{total}",
+        flush=True,
+    )
 
 
 class Retriever(Protocol):
@@ -68,6 +76,7 @@ class FaissRetriever:
             input_paths,
             chunk_size=chunk_size,
             overlap=overlap,
+            progress_callback=report_knowledge_base_progress,
         )
 
     def needs_rebuild(
@@ -155,7 +164,7 @@ class IsolatedFaissRetriever:
         )
         return self._process
 
-    def _request(self, command: str, **payload):
+    def _request(self, command: str, progress_callback=None, **payload):
         with self._lock:
             process = self._start()
             if process.stdin is None or process.stdout is None:
@@ -168,18 +177,27 @@ class IsolatedFaissRetriever:
             except (BrokenPipeError, OSError) as exc:
                 raise RuntimeError("Retrieval worker communication failed.") from exc
 
-            if not response_line:
-                return_code = process.poll()
-                self._process = None
-                raise RuntimeError(
-                    "Retrieval worker exited unexpectedly"
-                    + (f" with code {return_code}" if return_code is not None else "")
-                    + ". The API process remains available."
-                )
-            response = json.loads(response_line)
-            if not response.get("ok"):
-                raise RuntimeError(response.get("error", "Retrieval worker failed."))
-            return response.get("result")
+            while response_line:
+                response = json.loads(response_line)
+                if response.get("event") == "progress":
+                    if progress_callback is not None:
+                        progress_callback(
+                            int(response.get("current", 0)),
+                            int(response.get("total", 0)),
+                        )
+                    response_line = process.stdout.readline()
+                    continue
+                if not response.get("ok"):
+                    raise RuntimeError(response.get("error", "Retrieval worker failed."))
+                return response.get("result")
+
+            return_code = process.poll()
+            self._process = None
+            raise RuntimeError(
+                "Retrieval worker exited unexpectedly"
+                + (f" with code {return_code}" if return_code is not None else "")
+                + ". The API process remains available."
+            )
 
     def rebuild(
         self,
@@ -193,6 +211,7 @@ class IsolatedFaissRetriever:
                 input_paths=[str(path) for path in input_paths],
                 chunk_size=chunk_size,
                 overlap=overlap,
+                progress_callback=report_knowledge_base_progress,
             )
         )
 

@@ -5,8 +5,16 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from utils.prompts import SPORTS_HEALTH_SYSTEM_PROMPT
 
 
 DEFAULT_INSTRUCTION = "根据专业知识回答用户问题"
@@ -105,7 +113,7 @@ def format_sft_prompt(record: dict[str, Any]) -> str:
     output = record["output"].strip()
     user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
     return (
-        "<|im_start|>system\n你是一个专业、严谨的领域知识问答助手。<|im_end|>\n"
+        f"<|im_start|>system\n{SPORTS_HEALTH_SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{user_content}<|im_end|>\n"
         f"<|im_start|>assistant\n{output}<|im_end|>"
     )

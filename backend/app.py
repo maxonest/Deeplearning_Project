@@ -54,92 +54,36 @@ def get_startup_state() -> dict:
         return dict(startup_state)
 
 
-def rebuild_knowledge_base() -> None:
+def load_knowledge_base() -> None:
     update_startup_state(
         knowledge_base_ready=False,
         knowledge_base_chunks=0,
         knowledge_base_error=None,
     )
-    sources = [settings.processed_data_dir]
-    if settings.finetune_dataset_path.is_file():
-        sources.append(settings.finetune_dataset_path)
-    else:
-        logger.warning(
-            "Fine-tuning dataset was not found and will not be indexed: %s",
-            settings.finetune_dataset_path,
-        )
-
     retriever = rag_pipeline.retriever
     try:
         load = getattr(retriever, "load", None)
-        rebuild = getattr(retriever, "rebuild", None)
         if load is None:
             raise RuntimeError("The configured retriever does not support index validation.")
-        if rebuild is None:
-            raise RuntimeError("The configured retriever does not support rebuilding.")
-
-        index_info = None
-        invalid_index_error = None
-        try:
-            index_info = load()
-        except Exception as exc:
-            invalid_index_error = exc
-            logger.warning(
-                "Existing knowledge-base index is missing or incompatible and must be rebuilt: %s",
-                exc,
-            )
-
-        should_rebuild = invalid_index_error is not None
-        rebuild_reason = "missing, legacy, or incompatible index"
-        if not should_rebuild and settings.rebuild_knowledge_base_on_startup:
-            needs_rebuild = getattr(retriever, "needs_rebuild", None)
-            if needs_rebuild is None:
-                raise RuntimeError("The configured retriever cannot check index freshness.")
-            should_rebuild = needs_rebuild(
-                input_paths=sources,
-                chunk_size=settings.chunk_size,
-                overlap=settings.chunk_overlap,
-            )
-            rebuild_reason = "source content or indexing configuration changed"
-
-        if should_rebuild:
-            logger.info(
-                "Knowledge-base stage 1/3: %s; rebuilding "
-                "from sources=%s, embedding_model=%s, device=%s",
-                rebuild_reason,
-                [str(source) for source in sources],
-                settings.embedding_model,
-                settings.embedding_device,
-            )
-            chunk_count = rebuild(
-                input_paths=sources,
-                chunk_size=settings.chunk_size,
-                overlap=settings.chunk_overlap,
-            )
-            logger.info(
-                "Knowledge-base stage 2/3: saved %s chunks to %s",
-                chunk_count,
-                settings.faiss_index_dir,
-            )
-        else:
-            logger.info("Knowledge-base stage 1/3: existing index is current; skipping rebuild.")
-            assert index_info is not None
-            chunk_count = int(index_info.get("count", 0))
-            logger.info(
-                "Knowledge-base stage 2/3: validated existing index with %s chunks.",
-                chunk_count,
-            )
+        logger.info("Knowledge-base stage 1/2: validating persisted local index.")
+        index_info = load()
+        chunk_count = int(index_info.get("count", 0))
+        logger.info(
+            "Knowledge-base stage 1/2: loaded %s chunks%s.",
+            chunk_count,
+            " from backup" if index_info.get("loaded_from_backup") else "",
+        )
 
         update_startup_state(knowledge_base_chunks=chunk_count)
         hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
         if not hits:
             raise RuntimeError(
                 "Knowledge-base self-test returned no results after loading the index."
-        )
+            )
         update_startup_state(knowledge_base_ready=True)
         rag_pipeline.enable_retrieval()
         logger.info(
-            "Knowledge-base stage 3/3: self-test succeeded. query=%r, source=%s",
+            "Knowledge-base stage 2/2: self-test succeeded. query=%r, source=%s",
             settings.knowledge_base_self_test_query,
             hits[0].get("source", "unknown"),
         )
@@ -148,11 +92,10 @@ def rebuild_knowledge_base() -> None:
         update_startup_state(knowledge_base_error=knowledge_base_error)
         rag_pipeline.disable_retrieval(knowledge_base_error)
         logger.exception("Knowledge-base startup preparation failed.")
-        if not settings.retrieval_failure_fallback:
-            raise
-        logger.warning(
-            "Continuing without retrieval because RETRIEVAL_FAILURE_FALLBACK=true."
-        )
+        raise RuntimeError(
+            "Persisted knowledge base is unavailable. Build it before starting the backend: "
+            "python embeddings/embed_utils.py build"
+        ) from exc
 
 
 def preload_local_model() -> None:
@@ -178,10 +121,10 @@ def initialize_runtime() -> None:
         update_startup_state(
             startup_phase="knowledge_base",
             startup_ready=False,
-            startup_message="知识库构建中",
+            startup_message="知识库校验中",
             startup_error=None,
         )
-        rebuild_knowledge_base()
+        load_knowledge_base()
 
         if settings.use_local_model:
             update_startup_state(

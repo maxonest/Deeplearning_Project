@@ -25,6 +25,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from utils.data_loader import load_json_records, split_records  # noqa: E402
+from utils.prompts import SPORTS_HEALTH_SYSTEM_PROMPT  # noqa: E402
 
 
 LOG_DIR = PROJECT_ROOT / "logs"
@@ -85,7 +86,7 @@ def format_prompt_parts(record: dict[str, Any]) -> tuple[str, str]:
     output = record["output"].strip()
     user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
     prompt = (
-        "<|im_start|>system\n你是一个专业、严谨的运动健康领域问答助手。<|im_end|>\n"
+        f"<|im_start|>system\n{SPORTS_HEALTH_SYSTEM_PROMPT}<|im_end|>\n"
         f"<|im_start|>user\n{user_content}<|im_end|>\n"
         "<|im_start|>assistant\n"
     )
@@ -99,7 +100,7 @@ def record_to_messages(record: dict[str, Any], include_answer: bool) -> list[dic
     output = record["output"].strip()
     user_content = f"{instruction}\n\n{user_input}" if instruction else user_input
     messages = [
-        {"role": "system", "content": "你是一个专业、严谨的运动健康领域问答助手。"},
+        {"role": "system", "content": SPORTS_HEALTH_SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
     if include_answer:

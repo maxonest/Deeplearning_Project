@@ -27,6 +27,7 @@ def test_rag_pipeline_builds_prompt_and_calls_llm():
     assert "什么是RAG？" in llm.last_prompt
     assert "user: 你好" in llm.last_prompt
     assert "知识:什么是RAG？" in llm.last_prompt
+    assert "运动健康垂直领域专家" in llm.last_prompt
 
 
 def test_rag_context_truncation_keeps_highest_ranked_document():

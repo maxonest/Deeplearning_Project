@@ -8,6 +8,8 @@ from threading import RLock, Thread
 from typing import Iterator
 from typing import Protocol
 
+from utils.prompts import SPORTS_HEALTH_SYSTEM_PROMPT
+
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -162,7 +164,7 @@ class TransformersLLMClient:
         assert self._tokenizer is not None
         thinking = self.enable_thinking if enable_thinking is None else enable_thinking
         messages = [
-            {"role": "system", "content": "你是一个专业、严谨的本地领域知识问答助手。"},
+            {"role": "system", "content": SPORTS_HEALTH_SYSTEM_PROMPT},
             {"role": "user", "content": prompt},
         ]
         if hasattr(self._tokenizer, "apply_chat_template") and self._tokenizer.chat_template:

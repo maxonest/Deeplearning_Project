@@ -31,7 +31,7 @@ function getStatusPresentation(health, loading) {
     return { label: "等待后端", detail: "正在尝试连接本地服务", tone: "waiting" };
   }
   if (health.startup_phase === "knowledge_base") {
-    return { label: "知识库构建中", detail: "正在准备本地检索索引", tone: "waiting" };
+    return { label: "知识库校验中", detail: "正在读取并测试本地索引", tone: "waiting" };
   }
   if (health.startup_phase === "model") {
     return { label: "模型加载中", detail: "正在加载基础模型与 LoRA", tone: "waiting" };

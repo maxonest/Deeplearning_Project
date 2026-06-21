@@ -12,6 +12,7 @@ import json
 import os
 import sys
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable, Iterable
@@ -27,6 +28,8 @@ from utils.data_loader import read_corpus_files
 
 INDEX_FILE = "index.faiss"
 METADATA_FILE = "metadata.json"
+INDEX_BACKUP_FILE = "index.faiss.bak"
+METADATA_BACKUP_FILE = "metadata.json.bak"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 DEFAULT_INDEX_DIR = PROJECT_ROOT / "embeddings" / "faiss_index"
 DEFAULT_PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
@@ -173,13 +176,23 @@ class FaissKnowledgeBase:
         self._model = None
         self._index = None
         self._metadata: list[dict[str, Any]] | None = None
+        self._manifest: dict[str, Any] | None = None
         self._lock = RLock()
+        self._loaded_from_backup = False
 
     @property
     def exists(self) -> bool:
-        return (self.index_dir / INDEX_FILE).exists() and (self.index_dir / METADATA_FILE).exists()
+        primary_exists = (
+            (self.index_dir / INDEX_FILE).exists()
+            and (self.index_dir / METADATA_FILE).exists()
+        )
+        backup_exists = (
+            (self.index_dir / INDEX_BACKUP_FILE).exists()
+            and (self.index_dir / METADATA_BACKUP_FILE).exists()
+        )
+        return primary_exists or backup_exists
 
-    def index_info(self) -> dict[str, int]:
+    def index_info(self) -> dict[str, Any]:
         if self._index is None or self._metadata is None:
             self.load()
         assert self._index is not None
@@ -187,6 +200,12 @@ class FaissKnowledgeBase:
         return {
             "count": len(self._metadata),
             "dimension": int(self._index.d),
+            "loaded_from_backup": self._loaded_from_backup,
+            "built_at": (self._manifest or {}).get("built_at"),
+            "source_signature": (self._manifest or {}).get("source_signature"),
+            "sources": (self._manifest or {}).get("sources", []),
+            "chunk_size": (self._manifest or {}).get("chunk_size"),
+            "overlap": (self._manifest or {}).get("overlap"),
         }
 
     def _encoder(self):
@@ -267,7 +286,14 @@ class FaissKnowledgeBase:
                 [chunk.text for chunk in chunks],
                 progress_callback=progress_callback,
             )
-            self.save(embeddings, chunks, source_signature=source_signature)
+            self.save(
+                embeddings,
+                chunks,
+                source_signature=source_signature,
+                sources=[str(path.resolve()) for path in input_paths],
+                chunk_size=chunk_size,
+                overlap=overlap,
+            )
         return len(chunks)
 
     def save(
@@ -275,6 +301,9 @@ class FaissKnowledgeBase:
         embeddings: np.ndarray,
         chunks: list[DocumentChunk],
         source_signature: str | None = None,
+        sources: list[str] | None = None,
+        chunk_size: int | None = None,
+        overlap: int | None = None,
     ) -> None:
         if embeddings.ndim != 2:
             raise ValueError("embeddings must be a 2D array.")
@@ -290,13 +319,19 @@ class FaissKnowledgeBase:
 
         payload = {
             "format_version": INDEX_FORMAT_VERSION,
+            "built_at": datetime.now(timezone.utc).isoformat(),
             "embedding_model": self.embedding_model,
             "dimension": int(embeddings.shape[1]),
             "source_signature": source_signature,
+            "sources": sources or [],
+            "chunk_size": chunk_size,
+            "overlap": overlap,
             "chunks": [asdict(chunk) for chunk in chunks],
         }
         index_path = self.index_dir / INDEX_FILE
         metadata_path = self.index_dir / METADATA_FILE
+        backup_index_path = self.index_dir / INDEX_BACKUP_FILE
+        backup_metadata_path = self.index_dir / METADATA_BACKUP_FILE
         temp_index_path = self.index_dir / f"{INDEX_FILE}.tmp"
         temp_metadata_path = self.index_dir / f"{METADATA_FILE}.tmp"
         try:
@@ -305,50 +340,116 @@ class FaissKnowledgeBase:
                 json.dumps(payload, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
+            self._validate_index_pair(temp_index_path, temp_metadata_path)
+
+            primary_is_valid = False
+            if index_path.exists() and metadata_path.exists():
+                try:
+                    self._validate_index_pair(index_path, metadata_path)
+                    primary_is_valid = True
+                except Exception:
+                    primary_is_valid = False
+
+            if primary_is_valid:
+                backup_index_path.unlink(missing_ok=True)
+                backup_metadata_path.unlink(missing_ok=True)
+                os.replace(index_path, backup_index_path)
+                os.replace(metadata_path, backup_metadata_path)
+            else:
+                index_path.unlink(missing_ok=True)
+                metadata_path.unlink(missing_ok=True)
+
             os.replace(temp_index_path, index_path)
             os.replace(temp_metadata_path, metadata_path)
+        except Exception:
+            index_path.unlink(missing_ok=True)
+            metadata_path.unlink(missing_ok=True)
+            if backup_index_path.exists():
+                os.replace(backup_index_path, index_path)
+            if backup_metadata_path.exists():
+                os.replace(backup_metadata_path, metadata_path)
+            raise
         finally:
             temp_index_path.unlink(missing_ok=True)
             temp_metadata_path.unlink(missing_ok=True)
         self._index = index
         self._metadata = payload["chunks"]
+        self._manifest = payload
+        self._loaded_from_backup = False
+
+    def _validate_index_pair(self, index_path: Path, metadata_path: Path):
+        faiss = self._faiss()
+        index = faiss.read_index(str(index_path))
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise RuntimeError("FAISS metadata must be a JSON object.")
+        if payload.get("format_version") != INDEX_FORMAT_VERSION:
+            raise RuntimeError(
+                f"Unsupported FAISS metadata format: {payload.get('format_version')!r}. "
+                "Run the knowledge-base build command."
+            )
+
+        metadata = payload.get("chunks", [])
+        stored_model = payload.get("embedding_model")
+        stored_dimension = payload.get("dimension")
+        if stored_model != self.embedding_model:
+            raise RuntimeError(
+                "FAISS embedding model mismatch: "
+                f"index={stored_model!r}, runtime={self.embedding_model!r}. "
+                "Run the knowledge-base build command."
+            )
+        if stored_dimension != index.d:
+            raise RuntimeError(
+                f"FAISS dimension mismatch: metadata={stored_dimension}, index={index.d}."
+            )
+        if index.ntotal != len(metadata):
+            raise RuntimeError(
+                f"FAISS item count mismatch: index={index.ntotal}, metadata={len(metadata)}."
+            )
+        return index, metadata, payload
 
     def load(self) -> None:
         with self._lock:
-            if not self.exists:
-                raise FileNotFoundError(f"FAISS index not found in {self.index_dir}")
+            index_path = self.index_dir / INDEX_FILE
+            metadata_path = self.index_dir / METADATA_FILE
+            backup_index_path = self.index_dir / INDEX_BACKUP_FILE
+            backup_metadata_path = self.index_dir / METADATA_BACKUP_FILE
 
-            faiss = self._faiss()
-            index = faiss.read_index(str(self.index_dir / INDEX_FILE))
-            payload = json.loads((self.index_dir / METADATA_FILE).read_text(encoding="utf-8"))
-            if isinstance(payload, list):
-                raise RuntimeError(
-                    "Legacy FAISS metadata has no embedding model or dimension. Rebuild the knowledge base."
-                )
-            if payload.get("format_version") != INDEX_FORMAT_VERSION:
-                raise RuntimeError(
-                    f"Unsupported FAISS metadata format: {payload.get('format_version')!r}. "
-                    "Rebuild the knowledge base."
-                )
+            primary_error = None
+            if index_path.exists() and metadata_path.exists():
+                try:
+                    index, metadata, manifest = self._validate_index_pair(index_path, metadata_path)
+                    self._index = index
+                    self._metadata = metadata
+                    self._manifest = manifest
+                    self._loaded_from_backup = False
+                    return
+                except Exception as exc:
+                    primary_error = exc
 
-            metadata = payload.get("chunks", [])
-            stored_model = payload.get("embedding_model")
-            stored_dimension = payload.get("dimension")
-            if stored_model != self.embedding_model:
-                raise RuntimeError(
-                    "FAISS embedding model mismatch: "
-                    f"index={stored_model!r}, runtime={self.embedding_model!r}. Rebuild the index."
-                )
-            if stored_dimension != index.d:
-                raise RuntimeError(
-                    f"FAISS dimension mismatch: metadata={stored_dimension}, index={index.d}."
-                )
-            if index.ntotal != len(metadata):
-                raise RuntimeError(
-                    f"FAISS item count mismatch: index={index.ntotal}, metadata={len(metadata)}."
-                )
-            self._index = index
-            self._metadata = metadata
+            if backup_index_path.exists() and backup_metadata_path.exists():
+                try:
+                    index, metadata, manifest = self._validate_index_pair(
+                        backup_index_path,
+                        backup_metadata_path,
+                    )
+                    self._index = index
+                    self._metadata = metadata
+                    self._manifest = manifest
+                    self._loaded_from_backup = True
+                    return
+                except Exception as backup_error:
+                    raise RuntimeError(
+                        f"Primary and backup FAISS indexes are invalid. "
+                        f"primary={primary_error}; backup={backup_error}"
+                    ) from backup_error
+
+            if primary_error is not None:
+                raise RuntimeError(f"Local FAISS index is invalid: {primary_error}") from primary_error
+            raise FileNotFoundError(
+                f"FAISS index not found in {self.index_dir}. "
+                "Run: python embeddings/embed_utils.py build"
+            )
 
     def needs_rebuild(
         self,
@@ -410,30 +511,117 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     build_parser = subparsers.add_parser("build")
-    build_parser.add_argument("--input", default=str(DEFAULT_PROCESSED_DATA_DIR))
+    build_parser.add_argument(
+        "--input",
+        action="append",
+        dest="inputs",
+        help="Corpus file or directory. Repeat to include multiple sources.",
+    )
     build_parser.add_argument("--output", default=str(DEFAULT_INDEX_DIR))
     build_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     build_parser.add_argument("--chunk_size", type=int, default=DEFAULT_CHUNK_SIZE)
     build_parser.add_argument("--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP)
+    build_parser.add_argument("--batch_size", type=int, default=32)
+    build_parser.add_argument("--device", default="cpu")
+    build_parser.add_argument("--faiss_threads", type=int, default=1)
 
     query_parser = subparsers.add_parser("query")
     query_parser.add_argument("query")
     query_parser.add_argument("--index", default=str(DEFAULT_INDEX_DIR))
     query_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
     query_parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K)
+    query_parser.add_argument("--device", default="cpu")
+    query_parser.add_argument("--faiss_threads", type=int, default=1)
+
+    status_parser = subparsers.add_parser("status")
+    status_parser.add_argument("--index", default=str(DEFAULT_INDEX_DIR))
+    status_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
+    status_parser.add_argument("--faiss_threads", type=int, default=1)
 
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    def project_path(value: str | Path) -> Path:
+        path = Path(value)
+        return path if path.is_absolute() else PROJECT_ROOT / path
+
     if args.command == "build":
-        kb = FaissKnowledgeBase(index_dir=args.output, embedding_model=args.model)
-        count = kb.build(args.input, chunk_size=args.chunk_size, overlap=args.overlap)
-        print(f"Saved {count} chunks to {args.output}")
+        inputs = args.inputs or [
+            str(DEFAULT_PROCESSED_DATA_DIR),
+            str(PROJECT_ROOT / "data" / "finetune" / "sft_dataset_clean.json"),
+        ]
+        inputs = [project_path(path) for path in inputs]
+        missing_inputs = [path for path in inputs if not path.exists()]
+        if missing_inputs:
+            raise FileNotFoundError(
+                "Knowledge-base source does not exist: "
+                + ", ".join(str(path) for path in missing_inputs)
+            )
+        output_path = project_path(args.output)
+        kb = FaissKnowledgeBase(
+            index_dir=output_path,
+            embedding_model=args.model,
+            batch_size=args.batch_size,
+            device=args.device,
+            faiss_threads=args.faiss_threads,
+        )
+
+        def show_progress(current: int, total: int) -> None:
+            total = max(1, total)
+            ratio = current / total
+            width = 28
+            completed = round(width * ratio)
+            bar = "█" * completed + "░" * (width - completed)
+            ending = "\n" if current >= total else ""
+            print(
+                f"\rKnowledge-base encoding [{bar}] {ratio * 100:6.2f}%  {current}/{total}",
+                end=ending,
+                flush=True,
+            )
+
+        count = kb.build_from_sources(
+            inputs,
+            chunk_size=args.chunk_size,
+            overlap=args.overlap,
+            progress_callback=show_progress,
+        )
+        info = kb.index_info()
+        print(
+            f"Knowledge base saved: path={output_path.resolve()}, "
+            f"chunks={count}, dimension={info['dimension']}"
+        )
     elif args.command == "query":
-        kb = FaissKnowledgeBase(index_dir=args.index, embedding_model=args.model)
+        index_path = project_path(args.index)
+        kb = FaissKnowledgeBase(
+            index_dir=index_path,
+            embedding_model=args.model,
+            device=args.device,
+            faiss_threads=args.faiss_threads,
+        )
         print(json.dumps(kb.search(args.query, top_k=args.top_k), ensure_ascii=False, indent=2))
+    elif args.command == "status":
+        index_path = project_path(args.index)
+        kb = FaissKnowledgeBase(
+            index_dir=index_path,
+            embedding_model=args.model,
+            faiss_threads=args.faiss_threads,
+        )
+        kb.load()
+        info = kb.index_info()
+        print(
+            json.dumps(
+                {
+                    **info,
+                    "index_dir": str(index_path.resolve()),
+                    "embedding_model": args.model,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
 
 
 if __name__ == "__main__":

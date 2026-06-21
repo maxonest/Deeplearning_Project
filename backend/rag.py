@@ -12,17 +12,18 @@ from typing import Any, Iterator, Protocol
 
 from backend.llm import LLMClient, build_llm_client
 from utils.config import settings
+from utils.prompts import SPORTS_HEALTH_SYSTEM_PROMPT
 
 
 logger = logging.getLogger("uvicorn.error")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-KNOWLEDGE_BASE_PROGRESS_PREFIX = "__KNOWLEDGE_BASE_PROGRESS__"
+INDEX_FILES = ("index.faiss", "metadata.json")
+BACKUP_INDEX_FILES = ("index.faiss.bak", "metadata.json.bak")
 
 
-def report_knowledge_base_progress(current: int, total: int) -> None:
-    print(
-        f"{KNOWLEDGE_BASE_PROGRESS_PREFIX}{current}|{total}",
-        flush=True,
+def persisted_index_exists(index_dir: Path) -> bool:
+    return all((index_dir / name).exists() for name in INDEX_FILES) or all(
+        (index_dir / name).exists() for name in BACKUP_INDEX_FILES
     )
 
 
@@ -51,7 +52,7 @@ class FaissRetriever:
 
     @property
     def exists(self) -> bool:
-        return (self.index_dir / "index.faiss").exists() and (self.index_dir / "metadata.json").exists()
+        return persisted_index_exists(self.index_dir)
 
     def _knowledge_base(self):
         if self._kb is None:
@@ -66,32 +67,7 @@ class FaissRetriever:
             )
         return self._kb
 
-    def rebuild(
-        self,
-        input_paths: list[str | Path],
-        chunk_size: int,
-        overlap: int,
-    ) -> int:
-        return self._knowledge_base().build_from_sources(
-            input_paths,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            progress_callback=report_knowledge_base_progress,
-        )
-
-    def needs_rebuild(
-        self,
-        input_paths: list[str | Path],
-        chunk_size: int,
-        overlap: int,
-    ) -> bool:
-        return self._knowledge_base().needs_rebuild(
-            input_paths,
-            chunk_size=chunk_size,
-            overlap=overlap,
-        )
-
-    def load(self) -> dict[str, int]:
+    def load(self) -> dict[str, Any]:
         knowledge_base = self._knowledge_base()
         knowledge_base.load()
         return knowledge_base.index_info()
@@ -126,7 +102,7 @@ class IsolatedFaissRetriever:
 
     @property
     def exists(self) -> bool:
-        return (self.index_dir / "index.faiss").exists() and (self.index_dir / "metadata.json").exists()
+        return persisted_index_exists(self.index_dir)
 
     def _start(self) -> subprocess.Popen:
         if self._process is not None and self._process.poll() is None:
@@ -164,7 +140,7 @@ class IsolatedFaissRetriever:
         )
         return self._process
 
-    def _request(self, command: str, progress_callback=None, **payload):
+    def _request(self, command: str, **payload):
         with self._lock:
             process = self._start()
             if process.stdin is None or process.stdout is None:
@@ -179,14 +155,6 @@ class IsolatedFaissRetriever:
 
             while response_line:
                 response = json.loads(response_line)
-                if response.get("event") == "progress":
-                    if progress_callback is not None:
-                        progress_callback(
-                            int(response.get("current", 0)),
-                            int(response.get("total", 0)),
-                        )
-                    response_line = process.stdout.readline()
-                    continue
                 if not response.get("ok"):
                     raise RuntimeError(response.get("error", "Retrieval worker failed."))
                 return response.get("result")
@@ -199,38 +167,7 @@ class IsolatedFaissRetriever:
                 + ". The API process remains available."
             )
 
-    def rebuild(
-        self,
-        input_paths: list[str | Path],
-        chunk_size: int,
-        overlap: int,
-    ) -> int:
-        return int(
-            self._request(
-                "rebuild",
-                input_paths=[str(path) for path in input_paths],
-                chunk_size=chunk_size,
-                overlap=overlap,
-                progress_callback=report_knowledge_base_progress,
-            )
-        )
-
-    def needs_rebuild(
-        self,
-        input_paths: list[str | Path],
-        chunk_size: int,
-        overlap: int,
-    ) -> bool:
-        return bool(
-            self._request(
-                "needs_rebuild",
-                input_paths=[str(path) for path in input_paths],
-                chunk_size=chunk_size,
-                overlap=overlap,
-            )
-        )
-
-    def load(self) -> dict[str, int]:
+    def load(self) -> dict[str, Any]:
         return dict(self._request("load"))
 
     def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
@@ -339,7 +276,8 @@ class RAGPipeline:
             if enable_thinking
             else ""
         )
-        return f"""你是一个专业、友好、简洁的本地领域知识问答助手。
+        return f"""{SPORTS_HEALTH_SYSTEM_PROMPT}
+
 用户当前是在进行普通对话或寒暄时，请自然回应，不要提及知识库、检索结果或 RAG。
 如果用户随后提出专业问题，再结合本地知识库严谨回答。
 {thinking_instruction}
@@ -377,7 +315,8 @@ class RAGPipeline:
             else ""
         )
 
-        return f"""你是一个专业、严谨的本地领域知识问答助手。
+        return f"""{SPORTS_HEALTH_SYSTEM_PROMPT}
+
 请优先依据【本地知识库】回答；如果知识库不足，请明确说明不确定，并给出可验证的建议。
 {thinking_instruction}
 

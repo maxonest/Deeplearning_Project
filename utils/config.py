@@ -40,10 +40,9 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
     faiss_threads: int = 1
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
-    rebuild_knowledge_base_on_startup: bool = True
     knowledge_base_self_test_query: str = "什么是体适能？"
     isolate_retrieval_process: bool = True
-    retrieval_failure_fallback: bool = True
+    retrieval_failure_fallback: bool = False
     chunk_size: int = 600
     chunk_overlap: int = 80
     default_top_k: int = 5

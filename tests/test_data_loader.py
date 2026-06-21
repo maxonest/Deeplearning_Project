@@ -51,6 +51,7 @@ def test_format_sft_prompt_contains_chatml_parts():
     prompt = format_sft_prompt({"instruction": "回答", "input": "问题", "output": "答案"})
 
     assert "<|im_start|>system" in prompt
+    assert "运动健康垂直领域专家" in prompt
     assert "回答" in prompt
     assert "问题" in prompt
     assert "答案" in prompt

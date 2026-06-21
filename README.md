@@ -8,6 +8,7 @@
 - 知识库构建：读取 `txt/md/csv` 语料，切块后用 sentence-transformers 生成 embedding，并保存 FAISS 索引。
 - 本地 RAG：FastAPI 接收问题，管理多轮会话，检索 top-k 文档，拼接上下文后调用本地模型。
 - 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM，并可通过 PEFT 挂载 LoRA adapter。
+- 专家角色：训练、直接推理和 RAG 共用统一的运动健康垂直领域专家系统提示词。
 - 微调训练：基于 PyTorch 自定义训练循环 + PEFT 进行 LoRA/QLoRA SFT，避免 Windows 环境中 `Trainer/datasets/pyarrow` 的兼容性问题。
 - 前端页面：React 18 + Vite 多轮对话 UI，支持 top-k 参数和召回来源展示。
 - 测试：覆盖数据处理、多轮记忆、RAG 提示词链路和 FastAPI 接口。
@@ -107,6 +108,17 @@ python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --lora_adap
 
 ### 4. 启动后端测试模型
 
+首次部署或更新语料后，先构建并验证本地知识库：
+
+```powershell
+python embeddings/embed_utils.py build
+python embeddings/embed_utils.py status
+python embeddings/embed_utils.py query "什么是体适能？" --top_k 3
+```
+
+三条命令均成功后再启动系统。以后只要语料、embedding 模型和切块参数没有变化，
+无需再次构建。
+
 只启动 FastAPI，不启动前端：
 
 ```powershell
@@ -135,8 +147,15 @@ Invoke-RestMethod `
 确认模型是否已经加载。
 
 FastAPI 启动后会立即开放 `/health`，知识库和模型在后台继续初始化。前端每
-1.5 秒轮询健康状态，并依次显示“知识库构建中”“模型加载中”“系统就绪”。
+1.5 秒轮询健康状态，并依次显示“知识库校验中”“模型加载中”“系统就绪”。
 初始化完成前输入框和发送按钮保持禁用，完成后自动解锁，无需刷新页面。
+
+### 运动健康专家角色
+
+系统角色统一定义在 `utils/prompts.py` 的 `SPORTS_HEALTH_SYSTEM_PROMPT` 中，并同时
+用于直接模型推理、RAG 提示词、SFT 数据格式化和 LoRA 训练。修改专家定位时只需要
+调整这一处。现有 LoRA 无需重新训练即可在推理阶段使用新角色；以后重新训练时，
+训练模板也会自动使用同一份角色提示词。
 
 如果基础模型或 LoRA 路径错误、adapter 文件不完整，`/health` 会返回
 `startup_phase=failed` 和具体的 `startup_error`，聊天接口保持不可用。不要使用多个
@@ -149,14 +168,6 @@ Windows 后端启动日志会同时写入 `logs/backend_startup.log`。如果后
 
 `start_windows.py` 不会在终端实时输出后端日志；Uvicorn、知识库和模型加载日志只写入
 `logs/backend_startup.log`。终端仅显示服务地址、日志路径和进程退出摘要。
-需要首次构建或更新知识库时，终端会额外显示一条单行刷新的编码进度条，例如：
-
-```text
-Knowledge-base encoding [██████████████░░░░░░░░░░░░░░] 50.00%  3200/6400
-```
-
-索引未变化并被直接复用时不会显示该进度条。
-
 macOS/Linux 可使用：
 
 ```bash
@@ -216,7 +227,7 @@ data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数�
 
 当前项目支持把 `.txt/.md/.csv/.json/.jsonl` 放入 `data/processed` 参与建库。其中 JSON 问答数据会自动转成“来源/问题/答案”的可检索文本。
 
-后端启动时还会把 `data/finetune/sft_dataset_clean.json` 一并加入知识库。
+默认知识库构建命令还会把 `data/finetune/sft_dataset_clean.json` 一并加入知识库。
 该文件保持在微调目录中，不需要复制到 `data/processed`。每条
 `instruction/input/output` 记录会被转换为带来源的“问题 + 答案”检索文本。
 
@@ -226,12 +237,29 @@ data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数�
 python utils/prepare_corpus.py
 ```
 
-构建索引：
+首次构建或语料更新后，单独执行知识库构建命令。该命令默认同时读取
+`data/processed/` 和 `data/finetune/sft_dataset_clean.json`：
+
+```bash
+python embeddings/embed_utils.py build
+```
+
+编码时会显示单行进度条。新索引会先写入临时文件并完成读取校验，确认无误后才替换
+正式索引；上一版保存在 `index.faiss.bak` 和 `metadata.json.bak`。如果正式索引损坏，
+后端会自动读取上一版备份。
+
+需要指定语料源时，可重复使用 `--input`：
 
 ```bash
 python embeddings/embed_utils.py build \
   --input data/processed \
-  --output embeddings/faiss_index
+  --input data/finetune/sft_dataset_clean.json
+```
+
+检查本地索引状态：
+
+```bash
+python embeddings/embed_utils.py status
 ```
 
 测试检索：
@@ -240,39 +268,31 @@ python embeddings/embed_utils.py build \
 python embeddings/embed_utils.py query "你的问题" --top_k 5
 ```
 
-FAISS 索引会保存到 `embeddings/faiss_index`，构建完成后可以反复直接使用，不需要每次启动都重建。只有当你新增、删除或修改 `data/processed` 中的语料后，才需要重新运行 build 命令。
+FAISS 索引持久化在 `embeddings/faiss_index`。构建成功后，后端启动只读取、校验并
+执行一次检索自检，不再编码或修改索引。只有语料、embedding 模型或切块参数变化时，
+才需要重新运行 `build`。
 
-当前 `.env.example` 会在启动时检查知识库是否过期：
+推荐配置：
 
 ```env
 EMBEDDING_DEVICE=cpu
 EMBEDDING_BATCH_SIZE=32
 FAISS_THREADS=1
 FINETUNE_DATASET_PATH=data/finetune/sft_dataset_clean.json
-REBUILD_KNOWLEDGE_BASE_ON_STARTUP=true
 KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
 ISOLATE_RETRIEVAL_PROCESS=true
-RETRIEVAL_FAILURE_FALLBACK=true
+RETRIEVAL_FAILURE_FALLBACK=false
 ```
 
-系统会对语料内容、embedding 模型和切块参数计算指纹。只有这些内容发生变化、
-索引不存在或索引校验失败时才重建；未变化时直接复用持久化 FAISS 索引。
-旧版本 `metadata.json` 没有 `format_version` 时会被视为不可用索引并强制重建，
-即使 `REBUILD_KNOWLEDGE_BASE_ON_STARTUP=false` 也不会继续使用旧格式索引。
-
 FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免与加载到 CUDA
-的 9B 模型共享同一组原生运行库。即使检索子进程发生 Windows 原生崩溃，FastAPI
-主进程仍能继续运行；当 `RETRIEVAL_FAILURE_FALLBACK=true` 时，本次请求会退化为
-不带知识库文档的模型回答，并在后端日志中记录检索异常。
+的 9B 模型共享同一组原生运行库。
 
 `/health` 会返回 `knowledge_base_ready`、`knowledge_base_chunks` 和
-`knowledge_base_error`。检索不可用但模型仍可回答时，健康状态为 `degraded`。
-如果启动重建失败，当前进程会熔断知识库检索，不会在每个专业问题上重复加载同一个
-损坏索引；修复语料或环境后重启后端即可重新尝试。
+`knowledge_base_error`。默认 `RETRIEVAL_FAILURE_FALLBACK=false`，因此本地索引缺失、
+格式错误或检索自检失败时，后端不会加载模型，前端保持锁定并提示先运行构建命令。
 
-启动顺序为：检查或更新知识库、执行检索自检、加载基础模型、挂载 LoRA、开始接受
-请求。设置 `REBUILD_KNOWLEDGE_BASE_ON_STARTUP=false` 后，不再自动更新过期索引，
-但仍会校验并加载现有索引。
+稳定启动顺序为：读取本地索引、完整性校验、检索自检、加载基础模型、挂载 LoRA、
+后端就绪、前端自动解锁。
 
 ## 数据集格式
 

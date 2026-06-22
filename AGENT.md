@@ -9,7 +9,7 @@
 核心链路：
 
 1. 将原始资料整理到 `data/processed/`。
-2. 使用 sentence-transformers 生成向量，并持久化为 FAISS 索引。
+2. 使用 Transformers AutoModel + attention-mask mean pooling 生成向量，并持久化为 FAISS 索引。
 3. FastAPI 根据问题检索 top-k 文档、拼接多轮记忆和 RAG 提示词。
 4. Transformers 从本地目录加载 Qwen 模型，并通过 SSE 流式输出。
 5. React 前端展示 Markdown、检索来源和 `<think>...</think>` 思考内容。
@@ -35,7 +35,7 @@
 - 所有项目路径应优先基于 `pathlib.Path` 和项目根目录解析，不能依赖当前工作目录。
 - 本地配置从根目录 `.env` 读取；新增配置时同步更新 `.env.example` 和 `README.md`。
 - Windows 默认模型路径为 `models/qwen/Qwen3.5-9B`。
-- 默认向量模型为 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`；文档和查询使用相同的标准 SentenceTransformer 编码流程。
+- 默认向量模型为 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`；这是 Hugging Face 模型仓库名称，代码直接使用 Transformers 加载，不依赖 `sentence-transformers` Python 包。
 - 不要将模型权重、LoRA checkpoint、FAISS 索引、`.env`、日志或 `node_modules` 提交到 Git。
 - 需要直接运行子目录脚本时，确保项目根目录可被 Python 导入，避免出现 `No module named 'utils'`。
 
@@ -139,7 +139,7 @@ macOS/Linux 可使用 `./run.sh`；Windows 必须使用 `python start_windows.py
 - 修改训练：先 dry run，再运行 32 条样本的小规模训练，确认 loss、learning rate、grad_norm 和 checkpoint 正常。
 - 修改前端：运行 `npm run build`，并检查桌面与窄屏布局、流式输出、Markdown、思考块和键盘发送。
 - 不要求测试真实 9B 模型的改动时，应明确说明没有进行完整 GPU 验证。
-- 每次修改代码或部署配置时，必须同步更新根目录的 `UPDATE_INSTRUCTIONS.txt`，写明另一台 Windows 机器需要执行的拉取、依赖安装、数据迁移、建库、启动和验证命令；没有变化的步骤可以保留，但要更新日期并突出本次必做项。
+- 每次修改代码或部署配置时，必须用当前最新操作完整覆盖根目录的 `UPDATE_INSTRUCTIONS.txt`，不要累积或保留旧版本修复指令。文件应写明另一台 Windows 机器当前需要执行的拉取、依赖安装、数据迁移、建库、启动和验证命令，并更新日期。
 
 ## 开发原则
 

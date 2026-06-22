@@ -1,6 +1,6 @@
 """FAISS knowledge-base construction and retrieval.
 
-Heavy dependencies (`faiss`, `sentence-transformers`) are imported lazily so
+Heavy dependencies (`faiss`, `torch`, `transformers`) are imported lazily so
 backend tests can run without a GPU model or an existing vector index.
 """
 
@@ -22,6 +22,32 @@ import numpy as np
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def load_download_environment() -> None:
+    """Load only download-related values from .env without extra dependencies."""
+
+    env_path = PROJECT_ROOT / ".env"
+    if not env_path.is_file():
+        return
+    allowed_keys = {
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "HF_HUB_DISABLE_XET",
+        "HF_HUB_OFFLINE",
+    }
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in allowed_keys:
+            os.environ.setdefault(key, value.strip())
+
+
+load_download_environment()
 
 from utils.data_loader import read_corpus_files
 from utils.embedding_defaults import (
@@ -68,21 +94,64 @@ def _load_faiss():
     return faiss
 
 
-def _load_sentence_transformer():
-    try:
-        from sentence_transformers import SentenceTransformer
-    except ImportError as exc:
-        raise RuntimeError(
-            "sentence-transformers could not be imported. It may be installed, but one of its "
-            "dependencies is incompatible. Install sentence-transformers==3.0.1 for the "
-            "inference-only RAG environment. If the original error mentions "
-            "'numpy._core.multiarray failed to import', reinstall NumPy 1.26.4 together with "
-            "SciPy and scikit-learn in the same Python environment. If it mentions "
-            "'ASN1: NOT_ENOUGH_DATA', a newer sentence-transformers package imported datasets "
-            "and aiohttp through a damaged Windows certificate store. "
-            f"Original error: {type(exc).__name__}: {exc}"
-        ) from exc
-    return SentenceTransformer
+class TransformersMeanPoolingEncoder:
+    """Encode text with AutoModel and standard attention-mask mean pooling."""
+
+    def __init__(self, model_name: str, device: str | None = None) -> None:
+        try:
+            import torch
+            from transformers import AutoModel, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Embedding requires torch and transformers. "
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        self.torch = torch
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModel.from_pretrained(model_name)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def encode(
+        self,
+        texts: list[str],
+        batch_size: int = 32,
+        convert_to_numpy: bool = True,
+        normalize_embeddings: bool = True,
+        show_progress_bar: bool = False,
+    ):
+        del show_progress_bar
+        batches = []
+        for start in range(0, len(texts), batch_size):
+            batch = texts[start : start + batch_size]
+            encoded = self.tokenizer(
+                batch,
+                padding=True,
+                truncation=True,
+                max_length=128,
+                return_tensors="pt",
+            )
+            encoded = {key: value.to(self.device) for key, value in encoded.items()}
+            with self.torch.inference_mode():
+                output = self.model(**encoded)
+                token_embeddings = output.last_hidden_state
+                attention_mask = encoded["attention_mask"].unsqueeze(-1)
+                sentence_embeddings = (
+                    (token_embeddings * attention_mask).sum(dim=1)
+                    / attention_mask.sum(dim=1).clamp(min=1)
+                )
+                if normalize_embeddings:
+                    sentence_embeddings = self.torch.nn.functional.normalize(
+                        sentence_embeddings,
+                        p=2,
+                        dim=1,
+                    )
+            batches.append(sentence_embeddings.cpu())
+
+        embeddings = self.torch.cat(batches, dim=0)
+        return embeddings.numpy() if convert_to_numpy else embeddings
 
 
 def build_source_signature(
@@ -215,8 +284,7 @@ class FaissKnowledgeBase:
 
     def _encoder(self):
         if self._model is None:
-            SentenceTransformer = _load_sentence_transformer()
-            self._model = SentenceTransformer(
+            self._model = TransformersMeanPoolingEncoder(
                 self._resolve_embedding_model_location(),
                 device=self.device,
             )

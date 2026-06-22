@@ -5,7 +5,7 @@
 ## 功能模块
 
 - 数据集构建：JSON/JSONL 数据加载、字段标准化、训练/验证/测试划分。
-- 知识库构建：读取 `txt/md/csv` 语料，切块后用 sentence-transformers 生成 embedding，并保存 FAISS 索引。
+- 知识库构建：读取 `txt/md/csv` 语料，切块后用 Transformers mean pooling 生成 embedding，并保存 FAISS 索引。
 - 本地 RAG：FastAPI 接收问题，管理多轮会话，检索 top-k 文档，拼接上下文后调用本地模型。
 - 本地模型：支持通过 Transformers 加载 `Qwen3.5-9B` 等本地 causal LM，并可通过 PEFT 挂载 LoRA adapter。
 - 专家角色：训练、直接推理和 RAG 共用统一的运动健康垂直领域专家系统提示词。
@@ -67,11 +67,11 @@ pip install -r requirements-windows.txt
 ```
 
 Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
-Windows 下固定使用 `numpy==1.26.4`、`scipy==1.11.4` 和
-`scikit-learn==1.4.2`，避免 pip/conda 混装后出现 `_multiarray_umath` DLL 或 NumPy
-二进制 ABI 冲突。
-RAG 推理固定使用 `sentence-transformers==3.0.1`。该版本的基础安装不会强制导入
-`datasets/aiohttp`，可避开部分 Windows 证书库损坏导致的 `ASN1: NOT_ENOUGH_DATA`。
+Windows 下固定使用 `numpy==1.26.4`，避免 pip/conda 混装后出现
+`_multiarray_umath` DLL 或 NumPy 二进制 ABI 冲突。
+RAG 不再导入 `sentence-transformers` Python 包，而是直接用已有的
+`transformers + torch` 加载 MiniLM 并执行标准 attention-mask mean pooling，从而
+完全绕开 `datasets/aiohttp` 和损坏的 Windows 证书库导入链。
 
 ### 2. 配置模型路径
 
@@ -247,7 +247,9 @@ python utils/prepare_corpus.py
 
 默认使用轻量多语言模型
 `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`。文档和用户问题采用
-完全相同的标准 SentenceTransformer 编码流程，并统一归一化后写入或查询 FAISS。
+完全相同的 Transformers mean pooling 编码流程，并统一归一化后写入或查询 FAISS。
+这里的 `sentence-transformers/` 是 Hugging Face 模型仓库命名空间，不表示程序会
+导入同名 Python 包。
 第一次运行需要联网下载模型；以后会直接使用 Hugging Face 本地缓存。
 
 首次构建或语料更新后，单独执行知识库构建命令。该命令默认同时读取
@@ -301,7 +303,7 @@ KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
 RETRIEVAL_FAILURE_FALLBACK=true
 ```
 
-RAG 使用普通的进程内调用链：SentenceTransformer 编码问题、FAISS 检索 top-k、
+RAG 使用普通的进程内调用链：Transformers 编码问题、FAISS 检索 top-k、
 将命中文档拼接进提示词，再交给本地模型回答。索引构建和查询必须使用同一个
 Embedding 模型。
 

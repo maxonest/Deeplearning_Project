@@ -74,9 +74,12 @@ def _load_sentence_transformer():
     except ImportError as exc:
         raise RuntimeError(
             "sentence-transformers could not be imported. It may be installed, but one of its "
-            "binary dependencies is incompatible. If the original error mentions "
+            "dependencies is incompatible. Install sentence-transformers==3.0.1 for the "
+            "inference-only RAG environment. If the original error mentions "
             "'numpy._core.multiarray failed to import', reinstall NumPy 1.26.4 together with "
-            "SciPy and scikit-learn in the same Python environment. "
+            "SciPy and scikit-learn in the same Python environment. If it mentions "
+            "'ASN1: NOT_ENOUGH_DATA', a newer sentence-transformers package imported datasets "
+            "and aiohttp through a damaged Windows certificate store. "
             f"Original error: {type(exc).__name__}: {exc}"
         ) from exc
     return SentenceTransformer

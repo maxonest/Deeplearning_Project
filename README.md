@@ -70,6 +70,8 @@ Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `require
 Windows 下固定使用 `numpy==1.26.4`、`scipy==1.11.4` 和
 `scikit-learn==1.4.2`，避免 pip/conda 混装后出现 `_multiarray_umath` DLL 或 NumPy
 二进制 ABI 冲突。
+RAG 推理固定使用 `sentence-transformers==3.0.1`。该版本的基础安装不会强制导入
+`datasets/aiohttp`，可避开部分 Windows 证书库损坏导致的 `ASN1: NOT_ENOUGH_DATA`。
 
 ### 2. 配置模型路径
 

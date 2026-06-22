@@ -1,5 +1,4 @@
 accelerate>=0.33.0
-datasets>=2.20.0
 fastapi>=0.112.0
 numpy==1.26.4
 peft>=0.12.0
@@ -10,7 +9,7 @@ httpx>=0.27.0
 pytest>=8.2.0
 scikit-learn==1.4.2
 scipy==1.11.4
-sentence-transformers>=3.0.1
+sentence-transformers==3.0.1
 swanlab>=0.4.0
 transformers>=4.51.0
 uvicorn[standard]>=0.30.0

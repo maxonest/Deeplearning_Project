@@ -1,3 +1,4 @@
+import backend.rag as rag_module
 from backend.rag import RAGPipeline
 from utils.config import settings
 
@@ -65,3 +66,19 @@ def test_disabled_retrieval_does_not_call_worker():
     pipeline.disable_retrieval("startup rebuild failed")
 
     assert pipeline.retrieve("专业问题", top_k=1) == []
+
+
+def test_rag_pipeline_respects_disabled_lora_switch(monkeypatch, tmp_path):
+    captured = {}
+
+    def fake_build_llm_client(**kwargs):
+        captured.update(kwargs)
+        return FakeLLM()
+
+    monkeypatch.setattr(rag_module, "build_llm_client", fake_build_llm_client)
+    monkeypatch.setattr(settings, "use_lora_adapter", False)
+    monkeypatch.setattr(settings, "local_lora_adapter_path", tmp_path / "lora_adapter")
+
+    RAGPipeline(retriever=FakeRetriever())
+
+    assert captured["lora_adapter_path"] is None

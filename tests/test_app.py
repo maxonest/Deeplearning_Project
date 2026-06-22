@@ -79,6 +79,16 @@ def test_health_endpoint():
     assert "knowledge_base_ready" in response.json()
     assert "knowledge_base_chunks" in response.json()
     assert "knowledge_base_error" in response.json()
+    assert "use_lora_adapter" in response.json()
+
+
+def test_lora_switch_disables_adapter_without_clearing_path(monkeypatch, tmp_path):
+    adapter_path = tmp_path / "lora_adapter"
+    monkeypatch.setattr(app_module.settings, "local_lora_adapter_path", adapter_path)
+    monkeypatch.setattr(app_module.settings, "use_lora_adapter", False)
+
+    assert app_module.settings.active_lora_adapter_path is None
+    assert app_module.settings.local_lora_adapter_path == adapter_path
 
 
 def test_model_endpoint_calls_llm_directly(monkeypatch):

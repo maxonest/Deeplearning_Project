@@ -21,6 +21,7 @@ class HealthResponse(BaseModel):
     knowledge_base_chunks: int
     knowledge_base_error: str | None
     local_model_path: str
+    use_lora_adapter: bool
     local_lora_adapter_path: str | None
 
 
@@ -33,6 +34,7 @@ class ModelTestResponse(BaseModel):
     answer: str
     model_loaded: bool
     local_model_path: str
+    use_lora_adapter: bool
     local_lora_adapter_path: str | None
 
 
@@ -58,5 +60,6 @@ class ConfigResponse(BaseModel):
     default_top_k: int
     use_local_model: bool
     local_model_path: str
+    use_lora_adapter: bool
     local_lora_adapter_path: str | None
     embedding_model: str

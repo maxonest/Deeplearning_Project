@@ -104,8 +104,8 @@ def preload_local_model() -> None:
         return
 
     adapter = (
-        str(settings.local_lora_adapter_path)
-        if settings.local_lora_adapter_path
+        str(settings.active_lora_adapter_path)
+        if settings.active_lora_adapter_path
         else "disabled"
     )
     logger.info(
@@ -221,6 +221,7 @@ def health() -> HealthResponse:
         knowledge_base_chunks=int(state["knowledge_base_chunks"]),
         knowledge_base_error=state["knowledge_base_error"],
         local_model_path=str(settings.local_model_path),
+        use_lora_adapter=settings.use_lora_adapter,
         local_lora_adapter_path=(
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
         ),
@@ -244,6 +245,7 @@ def test_model(request: ModelTestRequest) -> ModelTestResponse:
         answer=answer,
         model_loaded=bool(getattr(rag_pipeline.llm_client, "is_loaded", False)),
         local_model_path=str(settings.local_model_path),
+        use_lora_adapter=settings.use_lora_adapter,
         local_lora_adapter_path=(
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
         ),
@@ -257,6 +259,7 @@ def get_config() -> ConfigResponse:
         default_top_k=settings.default_top_k,
         use_local_model=settings.use_local_model,
         local_model_path=str(settings.local_model_path),
+        use_lora_adapter=settings.use_lora_adapter,
         local_lora_adapter_path=(
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
         ),

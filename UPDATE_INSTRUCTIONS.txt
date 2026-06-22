@@ -1,74 +1,58 @@
 Deeplearning_Project 最新更新指令
 更新时间：2026-06-22
 
-本文件只保留当前版本需要执行的步骤。同步代码后，请在 Windows 项目根目录依次执行。
+本次更新：新增 LoRA adapter 启用开关。
 
-1. 同步代码并进入环境
+1. 同步代码
 
 git pull origin main
 conda activate DL_lyx
 
-2. 清理旧的 RAG 依赖
+2. 修改 .env
 
-当前版本不再使用 sentence-transformers Python 包，也不需要 datasets。
+在 LOCAL_MODEL_PATH 和 LOCAL_LORA_ADAPTER_PATH 附近加入：
 
-python -m pip uninstall -y sentence-transformers datasets
+USE_LORA_ADAPTER=true
 
-3. 安装当前项目依赖
+完整示例：
 
-python -m pip uninstall -y numpy
-conda install -c conda-forge --force-reinstall numpy=1.26.4 faiss-cpu -y
-python -m pip install -r requirements-windows.txt
+USE_LOCAL_MODEL=true
+LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
+USE_LORA_ADAPTER=true
+LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
 
-验证：
+设置说明：
 
-python -c "import numpy, torch, faiss, transformers; print('NumPy:', numpy.__version__); print('Transformers:', transformers.__version__)"
+USE_LORA_ADAPTER=true
+加载基础模型后挂载 LoRA adapter。
 
-4. 更新配置
+USE_LORA_ADAPTER=false
+只加载基础模型，不挂载 LoRA。LoRA 文件和路径会保留，不需要删除。
 
-如果项目根目录没有 .env：
+3. 重启服务
 
-copy .env.example .env
-
-确认 .env 至少包含：
-
-EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
-EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=32
-HTTP_PROXY=http://127.0.0.1:7897
-HTTPS_PROXY=http://127.0.0.1:7897
-NO_PROXY=localhost,127.0.0.1
-HF_HUB_DISABLE_XET=1
-RETRIEVAL_FAILURE_FALLBACK=true
-
-注意：模型名称中的 sentence-transformers/ 是 Hugging Face 仓库命名空间，不需要安装
-sentence-transformers Python 包。
-
-5. 重新构建知识库
-
-本次向量编码实现已改变，旧索引不能继续使用，必须重新构建：
-
-python embeddings/embed_utils.py build
-python embeddings/embed_utils.py status
-python embeddings/embed_utils.py query "什么是体适能？" --top_k 3
-
-6. 启动并验证
+如果服务正在运行，先按 Ctrl+C 停止，然后执行：
 
 python start_windows.py
+
+本次更新不需要重新安装依赖，也不需要重新构建知识库。
+
+4. 验证
 
 打开：
 
 http://localhost:8000/health
-http://localhost:5173
 
-预期：
-- startup_ready 为 true。
-- 知识库正常时 status 为 ok。
-- 知识库异常时 status 为 degraded，但模型普通聊天仍可使用。
+确认返回内容包含：
 
-当前 RAG 流程：
+"use_lora_adapter": true
 
-Transformers AutoModel + mean pooling
--> FAISS top-k 检索
--> 拼接知识库上下文
--> Qwen3.5-9B + LoRA 生成回答
+启用 LoRA 时，后端日志的模型加载阶段会显示实际 adapter 路径；关闭 LoRA 时显示：
+
+lora_adapter=disabled
+
+也可以访问：
+
+http://localhost:8000/api/config
+
+确认 `use_lora_adapter` 与 `.env` 中的设置一致。

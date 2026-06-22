@@ -57,12 +57,21 @@ class Settings(BaseSettings):
 
     use_local_model: bool = False
     local_model_path: Path = PROJECT_ROOT / "models" / "qwen" / "Qwen3.5-9B"
+    use_lora_adapter: bool = False
     local_lora_adapter_path: Path | None = None
     local_model_max_new_tokens: int = 2048
     local_model_temperature: float = 0.2
     local_model_top_p: float = 0.9
     local_model_enable_thinking: bool = False
     local_files_only: bool = True
+
+    @property
+    def active_lora_adapter_path(self) -> Path | None:
+        """Return the adapter path only when LoRA loading is enabled."""
+
+        if not self.use_lora_adapter:
+            return None
+        return self.local_lora_adapter_path
 
     @field_validator("cors_origins", mode="before")
     @classmethod

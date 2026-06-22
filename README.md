@@ -84,6 +84,7 @@ copy .env.example .env
 ```env
 USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
+USE_LORA_ADAPTER=true
 LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
 EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EMBEDDING_DEVICE=cpu
@@ -100,8 +101,10 @@ LOCAL_MODEL_ENABLE_THINKING=false
 python models/run_local_model.py --prompt "你好，请介绍一下你自己"
 ```
 
-配置了 `LOCAL_LORA_ADAPTER_PATH` 后，上述命令会先加载 `LOCAL_MODEL_PATH`
-中的基础模型，再挂载 LoRA adapter。也可以在命令行中显式指定：
+当 `USE_LORA_ADAPTER=true` 且配置了 `LOCAL_LORA_ADAPTER_PATH` 时，上述命令会先加载
+`LOCAL_MODEL_PATH` 中的基础模型，再挂载 LoRA adapter。设置
+`USE_LORA_ADAPTER=false` 后只加载基础模型，无需删除 adapter 文件或路径。也可以在
+命令行中显式指定：
 
 ```powershell
 python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --lora_adapter_path models/qwen/lora_adapter --prompt "你好，请介绍一下你自己"
@@ -109,8 +112,8 @@ python models/run_local_model.py --model_path models/qwen/Qwen3.5-9B --lora_adap
 
 从其他机器复制 adapter 时，目录中至少需要包含
 `adapter_config.json` 和 `adapter_model.safetensors`（或 `adapter_model.bin`），
-并且基础模型必须与训练 LoRA 时使用的模型兼容。不使用 LoRA 时，从 `.env`
-中删除 `LOCAL_LORA_ADAPTER_PATH` 或将其留空。
+并且基础模型必须与训练 LoRA 时使用的模型兼容。不使用 LoRA 时，在 `.env` 中设置
+`USE_LORA_ADAPTER=false`。
 
 如果能正常输出，再启动系统。
 
@@ -133,7 +136,8 @@ python embeddings/embed_utils.py query "什么是体适能？" --top_k 3
 python start_windows.py --backend-only
 ```
 
-当 `USE_LOCAL_MODEL=true` 时，FastAPI 启动后会在后台加载基础模型并挂载 LoRA。
+当 `USE_LOCAL_MODEL=true` 时，FastAPI 启动后会在后台加载基础模型；仅当
+`USE_LORA_ADAPTER=true` 时挂载 LoRA。
 等待 `/health` 返回 `startup_ready=true` 后，再在另一个 PowerShell 窗口执行：
 
 ```powershell
@@ -150,9 +154,9 @@ Invoke-RestMethod `
 ```
 
 模型加载耗时会转移到后端启动阶段，第一次请求无需再等待权重加载。返回结果中的
-`model_loaded` 应为 `true`，`local_lora_adapter_path` 应指向
-`models/qwen/lora_adapter`。也可以访问 `http://localhost:8000/health`
-确认模型是否已经加载。
+`model_loaded` 应为 `true`。启用 LoRA 时，`use_lora_adapter` 应为 `true`，
+`local_lora_adapter_path` 应指向 `models/qwen/lora_adapter`。也可以访问
+`http://localhost:8000/health` 确认模型是否已经加载。
 
 FastAPI 启动后会立即开放 `/health`，知识库和模型在后台继续初始化。前端每
 1.5 秒轮询健康状态，并依次显示“知识库校验中”“模型加载中”“系统就绪”。
@@ -312,8 +316,8 @@ Embedding 模型。
 时后端仍会加载模型并进入降级状态，普通聊天仍可使用；重新运行 `build` 并重启后端
 即可恢复 RAG。
 
-稳定启动顺序为：读取本地索引、完整性校验、检索自检、加载基础模型、挂载 LoRA、
-后端就绪、前端自动解锁。
+稳定启动顺序为：读取本地索引、完整性校验、检索自检、加载基础模型、按开关决定
+是否挂载 LoRA、后端就绪、前端自动解锁。
 
 ## 数据集格式
 

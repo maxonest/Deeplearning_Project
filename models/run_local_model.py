@@ -24,7 +24,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_path", default=str(settings.local_model_path))
     parser.add_argument(
         "--lora_adapter_path",
-        default=str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None,
+        default=(
+            str(settings.active_lora_adapter_path)
+            if settings.active_lora_adapter_path
+            else None
+        ),
         help="Optional trained PEFT LoRA adapter directory.",
     )
     parser.add_argument("--prompt", default="你好，请用一句话说明你是谁。")

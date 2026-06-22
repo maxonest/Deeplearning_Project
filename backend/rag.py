@@ -39,12 +39,14 @@ class FaissRetriever:
         self,
         index_dir: str | Path,
         embedding_model: str,
+        query_prompt_name: str | None = "query",
         embedding_device: str | None = None,
-        embedding_batch_size: int = 32,
+        embedding_batch_size: int = 4,
         faiss_threads: int = 1,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
+        self.query_prompt_name = query_prompt_name
         self.embedding_device = embedding_device
         self.embedding_batch_size = embedding_batch_size
         self.faiss_threads = faiss_threads
@@ -61,6 +63,7 @@ class FaissRetriever:
             self._kb = FaissKnowledgeBase(
                 index_dir=self.index_dir,
                 embedding_model=self.embedding_model,
+                query_prompt_name=self.query_prompt_name,
                 device=self.embedding_device,
                 batch_size=self.embedding_batch_size,
                 faiss_threads=self.faiss_threads,
@@ -88,12 +91,14 @@ class IsolatedFaissRetriever:
         self,
         index_dir: str | Path,
         embedding_model: str,
+        query_prompt_name: str | None = "query",
         embedding_device: str | None = "cpu",
-        embedding_batch_size: int = 32,
+        embedding_batch_size: int = 4,
         faiss_threads: int = 1,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
+        self.query_prompt_name = query_prompt_name
         self.embedding_device = embedding_device or "cpu"
         self.embedding_batch_size = embedding_batch_size
         self.faiss_threads = faiss_threads
@@ -119,6 +124,8 @@ class IsolatedFaissRetriever:
             str(self.index_dir),
             "--model",
             self.embedding_model,
+            "--query-prompt-name",
+            self.query_prompt_name or "",
             "--device",
             self.embedding_device,
             "--batch-size",
@@ -218,6 +225,7 @@ class RAGPipeline:
             self.retriever = retriever_class(
                 index_dir=settings.faiss_index_dir,
                 embedding_model=settings.embedding_model,
+                query_prompt_name=settings.embedding_query_prompt_name,
                 embedding_device=settings.embedding_device,
                 embedding_batch_size=settings.embedding_batch_size,
                 faiss_threads=settings.faiss_threads,

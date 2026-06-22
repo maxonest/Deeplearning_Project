@@ -13,6 +13,13 @@ from typing import Any
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from utils.embedding_defaults import (
+    DEFAULT_EMBEDDING_BATCH_SIZE,
+    DEFAULT_EMBEDDING_DEVICE,
+    DEFAULT_EMBEDDING_MODEL,
+    DEFAULT_EMBEDDING_QUERY_PROMPT_NAME,
+)
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,9 +42,10 @@ class Settings(BaseSettings):
     processed_data_dir: Path = PROJECT_ROOT / "data" / "processed"
     finetune_dataset_path: Path = PROJECT_ROOT / "data" / "finetune" / "sft_dataset_clean.json"
 
-    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-    embedding_device: str = "cpu"
-    embedding_batch_size: int = 32
+    embedding_model: str = DEFAULT_EMBEDDING_MODEL
+    embedding_query_prompt_name: str = DEFAULT_EMBEDDING_QUERY_PROMPT_NAME
+    embedding_device: str = DEFAULT_EMBEDDING_DEVICE
+    embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     faiss_threads: int = 1
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
     knowledge_base_self_test_query: str = "什么是体适能？"

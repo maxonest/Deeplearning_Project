@@ -85,6 +85,50 @@ def test_encode_reports_batch_progress():
     assert progress == [(0, 5), (2, 5), (4, 5), (5, 5)]
 
 
+def test_qwen_query_uses_query_prompt_but_documents_do_not():
+    calls = []
+
+    class FakeEncoder:
+        def encode(self, texts, **kwargs):
+            calls.append(kwargs)
+            return np.ones((len(texts), 3), dtype="float32")
+
+    knowledge_base = FaissKnowledgeBase(
+        embedding_model="test-model",
+        query_prompt_name="query",
+    )
+    knowledge_base._model = FakeEncoder()
+
+    knowledge_base.encode(["文档内容"])
+    knowledge_base.encode(["用户问题"], is_query=True)
+
+    assert "prompt_name" not in calls[0]
+    assert calls[1]["prompt_name"] == "query"
+
+
+def test_source_signature_changes_with_query_prompt(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "manual.txt").write_text("运动健康资料", encoding="utf-8")
+
+    without_prompt = build_source_signature(
+        [corpus],
+        embedding_model="test-model",
+        chunk_size=600,
+        overlap=80,
+        query_prompt_name=None,
+    )
+    with_prompt = build_source_signature(
+        [corpus],
+        embedding_model="test-model",
+        chunk_size=600,
+        overlap=80,
+        query_prompt_name="query",
+    )
+
+    assert without_prompt != with_prompt
+
+
 def test_load_falls_back_to_previous_valid_index(monkeypatch, tmp_path):
     class FakeIndex:
         def __init__(self, dimension):

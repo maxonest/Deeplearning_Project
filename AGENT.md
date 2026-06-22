@@ -35,6 +35,7 @@
 - 所有项目路径应优先基于 `pathlib.Path` 和项目根目录解析，不能依赖当前工作目录。
 - 本地配置从根目录 `.env` 读取；新增配置时同步更新 `.env.example` 和 `README.md`。
 - Windows 默认模型路径为 `models/qwen/Qwen3.5-9B`。
+- 默认向量模型路径为 `models/qwen/Qwen3-Embedding-4B`；文档编码不加 prompt，查询编码使用模型内置的 `query` prompt。
 - 不要将模型权重、LoRA checkpoint、FAISS 索引、`.env`、日志或 `node_modules` 提交到 Git。
 - 需要直接运行子目录脚本时，确保项目根目录可被 Python 导入，避免出现 `No module named 'utils'`。
 

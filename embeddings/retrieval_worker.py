@@ -35,8 +35,9 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Isolated local retrieval worker.")
     parser.add_argument("--index", required=True)
     parser.add_argument("--model", required=True)
+    parser.add_argument("--query-prompt-name", default="query")
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--faiss-threads", type=int, default=1)
     return parser.parse_args()
 
@@ -51,6 +52,7 @@ def main() -> None:
     knowledge_base = FaissKnowledgeBase(
         index_dir=args.index,
         embedding_model=args.model,
+        query_prompt_name=args.query_prompt_name or None,
         device=args.device,
         batch_size=args.batch_size,
         faiss_threads=args.faiss_threads,

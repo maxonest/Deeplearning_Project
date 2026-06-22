@@ -260,6 +260,7 @@ def get_config() -> ConfigResponse:
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
         ),
         embedding_model=settings.embedding_model,
+        embedding_query_prompt_name=settings.embedding_query_prompt_name,
     )
 
 

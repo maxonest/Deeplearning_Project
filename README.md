@@ -67,6 +67,7 @@ pip install -r requirements-windows.txt
 ```
 
 Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
+`Qwen3-Embedding-4B` 需要 `transformers>=4.51.0`，本项目依赖文件已按此版本更新。
 
 ### 2. 配置模型路径
 
@@ -80,6 +81,10 @@ copy .env.example .env
 USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
 LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
+EMBEDDING_MODEL=models/qwen/Qwen3-Embedding-4B
+EMBEDDING_QUERY_PROMPT_NAME=query
+EMBEDDING_DEVICE=cpu
+EMBEDDING_BATCH_SIZE=4
 LOCAL_MODEL_MAX_NEW_TOKENS=2048
 LOCAL_MODEL_TEMPERATURE=0.2
 LOCAL_MODEL_TOP_P=0.9
@@ -237,12 +242,24 @@ data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数�
 python utils/prepare_corpus.py
 ```
 
+将完整的 `Qwen3-Embedding-4B` 模型文件放在：
+
+```text
+models/qwen/Qwen3-Embedding-4B
+```
+
+模型目录中应包含 `config.json`、tokenizer 文件和模型权重。当前实现对知识文档直接
+编码，对用户查询使用 Qwen3 Embedding 内置的 `query` prompt，二者都会进行向量归一化。
+
 首次构建或语料更新后，单独执行知识库构建命令。该命令默认同时读取
 `data/processed/` 和 `data/finetune/sft_dataset_clean.json`：
 
-```bash
-python embeddings/embed_utils.py build
+```powershell
+python embeddings/embed_utils.py build --device cuda --batch_size 4
 ```
+
+离线构建结束后进程会释放显存。如果 CUDA 显存不足，将 `--batch_size` 调成 `2` 或
+`1`；没有 CUDA 时可改为 `--device cpu`，但 4B 模型的编码速度会明显变慢。
 
 编码时会显示单行进度条。新索引会先写入临时文件并完成读取校验，确认无误后才替换
 正式索引；上一版保存在 `index.faiss.bak` 和 `metadata.json.bak`。如果正式索引损坏，
@@ -275,8 +292,10 @@ FAISS 索引持久化在 `embeddings/faiss_index`。构建成功后，后端启�
 推荐配置：
 
 ```env
+EMBEDDING_MODEL=models/qwen/Qwen3-Embedding-4B
+EMBEDDING_QUERY_PROMPT_NAME=query
 EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=32
+EMBEDDING_BATCH_SIZE=4
 FAISS_THREADS=1
 FINETUNE_DATASET_PATH=data/finetune/sft_dataset_clean.json
 KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
@@ -285,7 +304,8 @@ RETRIEVAL_FAILURE_FALLBACK=false
 ```
 
 FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免与加载到 CUDA
-的 9B 模型共享同一组原生运行库。
+的 9B 模型争抢显存。`EMBEDDING_DEVICE` 控制后端查询时使用的设备，与离线建库命令
+的 `--device` 可以不同；索引和查询必须使用同一个 Embedding 模型及 `query` prompt。
 
 `/health` 会返回 `knowledge_base_ready`、`knowledge_base_chunks` 和
 `knowledge_base_error`。默认 `RETRIEVAL_FAILURE_FALLBACK=false`，因此本地索引缺失、

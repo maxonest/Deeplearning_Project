@@ -19,6 +19,8 @@ const INITIAL_HEALTH = {
   startup_message: "正在连接后端",
   startup_error: null,
   model_loaded: false,
+  use_lora_adapter: true,
+  use_rag: true,
   knowledge_base_ready: false,
   knowledge_base_chunks: 0,
 };
@@ -34,13 +36,20 @@ function getStatusPresentation(health, loading) {
     return { label: "知识库校验中", detail: "正在读取并测试本地索引", tone: "waiting" };
   }
   if (health.startup_phase === "model") {
-    return { label: "模型加载中", detail: "正在加载基础模型与 LoRA", tone: "waiting" };
+    return {
+      label: "模型加载中",
+      detail: health.use_lora_adapter === false ? "正在加载基础模型" : "正在加载基础模型与 LoRA",
+      tone: "waiting",
+    };
   }
   if (health.startup_phase === "failed") {
     return { label: "初始化失败", detail: health.startup_error || "请检查后端日志", tone: "error" };
   }
   if (health.status === "degraded") {
     return { label: "模型已就绪", detail: "知识库暂不可用，将使用模型直接回答", tone: "warning" };
+  }
+  if (health.startup_ready && health.use_rag === false) {
+    return { label: "模型已就绪", detail: "RAG 已关闭，当前使用模型直接回答", tone: "ready" };
   }
   if (health.startup_ready) {
     return { label: "系统就绪", detail: "模型与知识库均可用", tone: "ready" };
@@ -383,7 +392,7 @@ export default function IndexPage() {
       <aside className="sourcePanel">
         <div className="panelTitle">
           <span>知识库召回</span>
-          <strong>FAISS</strong>
+          <strong>{health.use_rag === false ? "已关闭" : "FAISS"}</strong>
         </div>
         <SourceList documents={documents} />
       </aside>

@@ -1,7 +1,7 @@
 Deeplearning_Project 最新更新指令
 更新时间：2026-06-22
 
-本次更新：新增 LoRA adapter 启用开关。
+本次更新：新增 RAG 启用开关。
 
 1. 同步代码
 
@@ -10,24 +10,35 @@ conda activate DL_lyx
 
 2. 修改 .env
 
-在 LOCAL_MODEL_PATH 和 LOCAL_LORA_ADAPTER_PATH 附近加入：
+加入：
 
-USE_LORA_ADAPTER=true
-
-完整示例：
-
-USE_LOCAL_MODEL=true
-LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
-USE_LORA_ADAPTER=true
-LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
+USE_RAG=true
 
 设置说明：
 
-USE_LORA_ADAPTER=true
-加载基础模型后挂载 LoRA adapter。
+USE_RAG=true
+启动时加载并校验本地 FAISS 知识库，专业问题使用 RAG 检索后回答。
 
+USE_RAG=false
+不加载、不校验、不查询知识库，所有问题直接由基础模型或 LoRA 回答。
+
+推荐使用以下组合对比回答效果：
+
+基础模型：
 USE_LORA_ADAPTER=false
-只加载基础模型，不挂载 LoRA。LoRA 文件和路径会保留，不需要删除。
+USE_RAG=false
+
+仅 LoRA：
+USE_LORA_ADAPTER=true
+USE_RAG=false
+
+仅 RAG：
+USE_LORA_ADAPTER=false
+USE_RAG=true
+
+LoRA + RAG：
+USE_LORA_ADAPTER=true
+USE_RAG=true
 
 3. 重启服务
 
@@ -45,14 +56,16 @@ http://localhost:8000/health
 
 确认返回内容包含：
 
-"use_lora_adapter": true
+"use_rag": true
 
-启用 LoRA 时，后端日志的模型加载阶段会显示实际 adapter 路径；关闭 LoRA 时显示：
-
-lora_adapter=disabled
+RAG 关闭时：
+- status 应为 ok，而不是 degraded。
+- startup_message 显示“模型已就绪，RAG 已关闭”。
+- knowledge_base_ready 为 false。
+- 前端右侧知识库区域显示“已关闭”。
 
 也可以访问：
 
 http://localhost:8000/api/config
 
-确认 `use_lora_adapter` 与 `.env` 中的设置一致。
+确认 `use_rag` 与 `.env` 中设置一致。

@@ -79,6 +79,7 @@ class RAGPipeline:
         llm_client: LLMClient | None = None,
         retriever: Retriever | None = None,
         max_context_chars: int = settings.max_context_chars,
+        use_rag: bool = settings.use_rag,
     ) -> None:
         self.llm_client = llm_client or build_llm_client(
             use_local_model=settings.use_local_model,
@@ -101,10 +102,18 @@ class RAGPipeline:
                 faiss_threads=settings.faiss_threads,
             )
         self.max_context_chars = max_context_chars
-        self._retrieval_enabled = True
+        self.use_rag = use_rag
+        self._retrieval_enabled = use_rag
         self._retrieval_disabled_reason: str | None = None
 
+    def set_rag_enabled(self, enabled: bool) -> None:
+        self.use_rag = enabled
+        self._retrieval_enabled = enabled
+        self._retrieval_disabled_reason = None if enabled else "RAG disabled by configuration"
+
     def enable_retrieval(self) -> None:
+        if not self.use_rag:
+            return
         self._retrieval_enabled = True
         self._retrieval_disabled_reason = None
 
@@ -114,7 +123,7 @@ class RAGPipeline:
         logger.error("Knowledge-base retrieval disabled: %s", reason)
 
     def retrieve(self, query: str, top_k: int = settings.default_top_k) -> list[dict[str, Any]]:
-        if not self._retrieval_enabled:
+        if not self.use_rag or not self._retrieval_enabled:
             return []
         try:
             return self.retriever.search(query, top_k=top_k)
@@ -164,6 +173,30 @@ class RAGPipeline:
 {memory}
 
 【用户消息】
+{question}
+"""
+
+    def build_direct_prompt(
+        self,
+        question: str,
+        memory_context: str = "",
+        enable_thinking: bool | None = None,
+    ) -> str:
+        memory = (memory_context or "暂无")[-self.max_context_chars :]
+        thinking_instruction = (
+            "如果启用深度思考，请在 <think></think> 中使用中文进行思考，最终回答也使用中文。\n"
+            if enable_thinking
+            else ""
+        )
+        return f"""{SPORTS_HEALTH_SYSTEM_PROMPT}
+
+请结合已有专业知识和对话上下文自然回答用户问题。表达应清晰、友好，避免机械复述固定模板。
+{thinking_instruction}
+
+【多轮对话记忆】
+{memory}
+
+【用户问题】
 {question}
 """
 
@@ -220,7 +253,14 @@ class RAGPipeline:
         top_k: int = settings.default_top_k,
         enable_thinking: bool | None = None,
     ) -> dict[str, Any]:
-        if self.is_small_talk(question):
+        if not self.use_rag:
+            documents: list[dict[str, Any]] = []
+            prompt = self.build_direct_prompt(
+                question,
+                memory_context=memory_context,
+                enable_thinking=enable_thinking,
+            )
+        elif self.is_small_talk(question):
             documents: list[dict[str, Any]] = []
             prompt = self.build_chat_prompt(
                 question,
@@ -249,7 +289,14 @@ class RAGPipeline:
         top_k: int = settings.default_top_k,
         enable_thinking: bool | None = None,
     ) -> tuple[list[dict[str, Any]], Iterator[str]]:
-        if self.is_small_talk(question):
+        if not self.use_rag:
+            documents: list[dict[str, Any]] = []
+            prompt = self.build_direct_prompt(
+                question,
+                memory_context=memory_context,
+                enable_thinking=enable_thinking,
+            )
+        elif self.is_small_talk(question):
             documents: list[dict[str, Any]] = []
             prompt = self.build_chat_prompt(
                 question,

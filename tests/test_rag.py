@@ -82,3 +82,19 @@ def test_rag_pipeline_respects_disabled_lora_switch(monkeypatch, tmp_path):
     RAGPipeline(retriever=FakeRetriever())
 
     assert captured["lora_adapter_path"] is None
+
+
+def test_disabled_rag_skips_retrieval_and_uses_direct_prompt():
+    retriever = FakeRetriever()
+    retriever.search = lambda query, top_k: (_ for _ in ()).throw(
+        AssertionError("RAG-disabled requests must not retrieve")
+    )
+    llm = FakeLLM()
+    pipeline = RAGPipeline(llm_client=llm, retriever=retriever, use_rag=False)
+
+    result = pipeline.answer("如何安排每周运动计划？", top_k=5)
+
+    assert result["documents"] == []
+    assert "如何安排每周运动计划？" in llm.last_prompt
+    assert "本地知识库" not in llm.last_prompt
+    assert "避免机械复述固定模板" in llm.last_prompt

@@ -119,13 +119,22 @@ def preload_local_model() -> None:
 
 def initialize_runtime() -> None:
     try:
-        update_startup_state(
-            startup_phase="knowledge_base",
-            startup_ready=False,
-            startup_message="知识库校验中",
-            startup_error=None,
-        )
-        load_knowledge_base()
+        rag_pipeline.set_rag_enabled(settings.use_rag)
+        if settings.use_rag:
+            update_startup_state(
+                startup_phase="knowledge_base",
+                startup_ready=False,
+                startup_message="知识库校验中",
+                startup_error=None,
+            )
+            load_knowledge_base()
+        else:
+            update_startup_state(
+                knowledge_base_ready=False,
+                knowledge_base_chunks=0,
+                knowledge_base_error=None,
+            )
+            logger.info("RAG is disabled by USE_RAG=false; skipping knowledge-base loading.")
 
         if settings.use_local_model:
             update_startup_state(
@@ -135,11 +144,12 @@ def initialize_runtime() -> None:
             preload_local_model()
 
         state = get_startup_state()
-        ready_message = (
-            "系统已就绪"
-            if state["knowledge_base_ready"]
-            else "模型已就绪，知识库暂不可用"
-        )
+        if not settings.use_rag:
+            ready_message = "模型已就绪，RAG 已关闭"
+        elif state["knowledge_base_ready"]:
+            ready_message = "系统已就绪"
+        else:
+            ready_message = "模型已就绪，知识库暂不可用"
         update_startup_state(
             startup_phase="ready",
             startup_ready=True,
@@ -205,7 +215,7 @@ def health() -> HealthResponse:
         status = "failed"
     elif not state["startup_ready"]:
         status = "initializing"
-    elif not state["knowledge_base_ready"]:
+    elif settings.use_rag and not state["knowledge_base_ready"]:
         status = "degraded"
     else:
         status = "ok"
@@ -217,6 +227,7 @@ def health() -> HealthResponse:
         startup_error=state["startup_error"],
         use_local_model=settings.use_local_model,
         model_loaded=bool(getattr(rag_pipeline.llm_client, "is_loaded", False)),
+        use_rag=settings.use_rag,
         knowledge_base_ready=bool(state["knowledge_base_ready"]),
         knowledge_base_chunks=int(state["knowledge_base_chunks"]),
         knowledge_base_error=state["knowledge_base_error"],
@@ -258,6 +269,7 @@ def get_config() -> ConfigResponse:
         app_name=settings.app_name,
         default_top_k=settings.default_top_k,
         use_local_model=settings.use_local_model,
+        use_rag=settings.use_rag,
         local_model_path=str(settings.local_model_path),
         use_lora_adapter=settings.use_lora_adapter,
         local_lora_adapter_path=(

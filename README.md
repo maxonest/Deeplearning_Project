@@ -86,6 +86,7 @@ USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
 USE_LORA_ADAPTER=true
 LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
+USE_RAG=true
 EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EMBEDDING_DEVICE=cpu
 EMBEDDING_BATCH_SIZE=32
@@ -161,6 +162,20 @@ Invoke-RestMethod `
 FastAPI 启动后会立即开放 `/health`，知识库和模型在后台继续初始化。前端每
 1.5 秒轮询健康状态，并依次显示“知识库校验中”“模型加载中”“系统就绪”。
 初始化完成前输入框和发送按钮保持禁用，完成后自动解锁，无需刷新页面。
+
+### RAG 开关
+
+通过 `.env` 控制是否使用知识库检索：
+
+```env
+USE_RAG=true
+```
+
+- `USE_RAG=true`：启动时加载并校验 FAISS，专业问题检索 top-k 文档后回答。
+- `USE_RAG=false`：跳过知识库加载和检索，所有问题直接由当前基础模型/LoRA 回答。
+
+关闭 RAG 不会删除本地索引。重新设置为 `true` 并重启后端即可恢复，也不需要重新
+构建知识库。`/health` 和 `/api/config` 会返回 `use_rag` 当前值。
 
 ### 运动健康专家角色
 

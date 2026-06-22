@@ -46,6 +46,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     faiss_threads: int = 1
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
+    use_rag: bool = True
     knowledge_base_self_test_query: str = "什么是体适能？"
     retrieval_failure_fallback: bool = True
     chunk_size: int = 600

@@ -17,6 +17,7 @@ class HealthResponse(BaseModel):
     startup_error: str | None
     use_local_model: bool
     model_loaded: bool
+    use_rag: bool
     knowledge_base_ready: bool
     knowledge_base_chunks: int
     knowledge_base_error: str | None
@@ -59,6 +60,7 @@ class ConfigResponse(BaseModel):
     app_name: str
     default_top_k: int
     use_local_model: bool
+    use_rag: bool
     local_model_path: str
     use_lora_adapter: bool
     local_lora_adapter_path: str | None

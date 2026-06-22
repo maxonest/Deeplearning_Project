@@ -38,6 +38,9 @@ class FakePipeline:
     def enable_retrieval(self):
         self.retrieval_enabled = True
 
+    def set_rag_enabled(self, enabled):
+        self.retrieval_enabled = enabled
+
     def disable_retrieval(self, reason):
         self.retrieval_enabled = False
 
@@ -79,6 +82,7 @@ def test_health_endpoint():
     assert "knowledge_base_ready" in response.json()
     assert "knowledge_base_chunks" in response.json()
     assert "knowledge_base_error" in response.json()
+    assert "use_rag" in response.json()
     assert "use_lora_adapter" in response.json()
 
 
@@ -209,6 +213,7 @@ def test_initialize_runtime_exposes_model_phase_and_ready_state(monkeypatch):
         lambda: phases.append(app_module.get_startup_state()["startup_phase"]),
     )
     monkeypatch.setattr(app_module.settings, "use_local_model", True)
+    monkeypatch.setattr(app_module.settings, "use_rag", True)
     app_module.update_startup_state(knowledge_base_ready=True)
 
     app_module.initialize_runtime()
@@ -217,3 +222,31 @@ def test_initialize_runtime_exposes_model_phase_and_ready_state(monkeypatch):
     assert phases == ["knowledge_base", "model"]
     assert state["startup_phase"] == "ready"
     assert state["startup_ready"] is True
+
+
+def test_initialize_runtime_skips_knowledge_base_when_rag_is_disabled(monkeypatch):
+    pipeline = FakePipeline()
+    phases = []
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+    monkeypatch.setattr(
+        app_module,
+        "load_knowledge_base",
+        lambda: (_ for _ in ()).throw(AssertionError("knowledge base should not load")),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "preload_local_model",
+        lambda: phases.append(app_module.get_startup_state()["startup_phase"]),
+    )
+    monkeypatch.setattr(app_module.settings, "use_local_model", True)
+    monkeypatch.setattr(app_module.settings, "use_rag", False)
+
+    app_module.initialize_runtime()
+
+    state = app_module.get_startup_state()
+    assert phases == ["model"]
+    assert pipeline.retrieval_enabled is False
+    assert state["startup_ready"] is True
+    assert state["knowledge_base_ready"] is False
+    assert state["startup_message"] == "模型已就绪，RAG 已关闭"
+    assert app_module.health().status == "ok"

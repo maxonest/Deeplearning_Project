@@ -76,7 +76,13 @@ def _load_sentence_transformer():
     try:
         from sentence_transformers import SentenceTransformer
     except ImportError as exc:
-        raise RuntimeError("sentence-transformers is not installed.") from exc
+        raise RuntimeError(
+            "sentence-transformers could not be imported. It may be installed, but one of its "
+            "binary dependencies is incompatible. If the original error mentions "
+            "'numpy._core.multiarray failed to import', reinstall NumPy 1.26.4 together with "
+            "SciPy and scikit-learn in the same Python environment. "
+            f"Original error: {type(exc).__name__}: {exc}"
+        ) from exc
     return SentenceTransformer
 
 

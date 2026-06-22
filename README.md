@@ -68,6 +68,8 @@ pip install -r requirements-windows.txt
 
 Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
 `Qwen3-Embedding-4B` 需要 `transformers>=4.51.0`，本项目依赖文件已按此版本更新。
+Windows 下暂时固定使用 NumPy 1.26.x，避免 FAISS、SciPy 或 scikit-learn 与 NumPy 2.x
+发生二进制 ABI 冲突。
 
 ### 2. 配置模型路径
 

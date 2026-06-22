@@ -67,8 +67,9 @@ pip install -r requirements-windows.txt
 ```
 
 Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
-Windows 下暂时固定使用 NumPy 1.26.x，避免 FAISS、SciPy 或 scikit-learn 与 NumPy 2.x
-发生二进制 ABI 冲突。
+Windows 下固定使用 `numpy==1.26.4`、`scipy==1.11.4` 和
+`scikit-learn==1.4.2`，避免 pip/conda 混装后出现 `_multiarray_umath` DLL 或 NumPy
+二进制 ABI 冲突。
 
 ### 2. 配置模型路径
 

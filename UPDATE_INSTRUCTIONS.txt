@@ -1,0 +1,81 @@
+Deeplearning_Project 更新执行说明
+更新时间：2026-06-22
+
+说明：
+1. 本文件随代码一起提交到 GitHub。
+2. 每次同步新代码后，请在项目根目录按顺序执行。
+3. 命令适用于 Windows PowerShell / Anaconda Prompt。
+
+一、同步代码
+
+git pull origin main
+conda activate DL_lyx
+
+二、修复并固定知识库依赖
+
+当前版本固定使用：
+- numpy==1.26.4
+- scipy==1.11.4
+- scikit-learn==1.4.2
+
+如果出现以下错误：
+- numpy._core.multiarray failed to import
+- DLL load failed while importing _multiarray_umath
+
+执行：
+
+python -m pip uninstall -y numpy scipy scikit-learn
+conda install -c conda-forge --force-reinstall numpy=1.26.4 scipy=1.11.4 scikit-learn=1.4.2 faiss-cpu -y
+python -m pip install -r requirements-windows.txt
+
+验证：
+
+python -c "import numpy, scipy, sklearn, torch, faiss; print('NumPy:', numpy.__version__); print('SciPy:', scipy.__version__); print('sklearn:', sklearn.__version__)"
+python -c "from sentence_transformers import SentenceTransformer; print('sentence-transformers OK')"
+
+三、配置代理
+
+确认项目根目录的 .env 包含：
+
+HTTP_PROXY=http://127.0.0.1:7897
+HTTPS_PROXY=http://127.0.0.1:7897
+NO_PROXY=localhost,127.0.0.1
+HF_HUB_DISABLE_XET=1
+
+如果没有 .env：
+
+copy .env.example .env
+
+四、重新构建知识库
+
+本次 RAG 已恢复为标准 SentenceTransformer + FAISS 实现，旧的 Qwen3-Embedding-4B
+索引不兼容，需要重新构建一次：
+
+python embeddings/embed_utils.py build
+python embeddings/embed_utils.py status
+python embeddings/embed_utils.py query "什么是体适能？" --top_k 3
+
+五、启动系统
+
+python start_windows.py
+
+启动后检查：
+
+http://localhost:8000/health
+http://localhost:5173
+
+预期结果：
+- health 的 startup_ready 为 true。
+- 知识库正常时 status 为 ok。
+- 知识库异常时 status 为 degraded，但普通聊天和模型仍可使用。
+
+六、当前 RAG 流程
+
+SentenceTransformer 编码文档和问题
+-> FAISS 检索 top-k
+-> 拼接知识库上下文
+-> Qwen3.5-9B + LoRA 生成回答
+
+默认 Embedding 模型：
+
+sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2

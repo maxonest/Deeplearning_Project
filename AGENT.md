@@ -139,6 +139,7 @@ macOS/Linux 可使用 `./run.sh`；Windows 必须使用 `python start_windows.py
 - 修改训练：先 dry run，再运行 32 条样本的小规模训练，确认 loss、learning rate、grad_norm 和 checkpoint 正常。
 - 修改前端：运行 `npm run build`，并检查桌面与窄屏布局、流式输出、Markdown、思考块和键盘发送。
 - 不要求测试真实 9B 模型的改动时，应明确说明没有进行完整 GPU 验证。
+- 每次修改代码或部署配置时，必须同步更新根目录的 `UPDATE_INSTRUCTIONS.txt`，写明另一台 Windows 机器需要执行的拉取、依赖安装、数据迁移、建库、启动和验证命令；没有变化的步骤可以保留，但要更新日期并突出本次必做项。
 
 ## 开发原则
 

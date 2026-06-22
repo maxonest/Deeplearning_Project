@@ -17,7 +17,6 @@ from utils.embedding_defaults import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DEVICE,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_EMBEDDING_QUERY_PROMPT_NAME,
 )
 
 
@@ -43,14 +42,12 @@ class Settings(BaseSettings):
     finetune_dataset_path: Path = PROJECT_ROOT / "data" / "finetune" / "sft_dataset_clean.json"
 
     embedding_model: str = DEFAULT_EMBEDDING_MODEL
-    embedding_query_prompt_name: str = DEFAULT_EMBEDDING_QUERY_PROMPT_NAME
     embedding_device: str = DEFAULT_EMBEDDING_DEVICE
     embedding_batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE
     faiss_threads: int = 1
     faiss_index_dir: Path = PROJECT_ROOT / "embeddings" / "faiss_index"
     knowledge_base_self_test_query: str = "什么是体适能？"
-    isolate_retrieval_process: bool = True
-    retrieval_failure_fallback: bool = False
+    retrieval_failure_fallback: bool = True
     chunk_size: int = 600
     chunk_overlap: int = 80
     default_top_k: int = 5

@@ -85,7 +85,7 @@ def test_encode_reports_batch_progress():
     assert progress == [(0, 5), (2, 5), (4, 5), (5, 5)]
 
 
-def test_qwen_query_uses_query_prompt_but_documents_do_not():
+def test_documents_and_queries_use_the_same_standard_encoding():
     calls = []
 
     class FakeEncoder:
@@ -93,43 +93,17 @@ def test_qwen_query_uses_query_prompt_but_documents_do_not():
             calls.append(kwargs)
             return np.ones((len(texts), 3), dtype="float32")
 
-    knowledge_base = FaissKnowledgeBase(
-        embedding_model="test-model",
-        query_prompt_name="query",
-    )
+    knowledge_base = FaissKnowledgeBase(embedding_model="test-model")
     knowledge_base._model = FakeEncoder()
 
     knowledge_base.encode(["文档内容"])
-    knowledge_base.encode(["用户问题"], is_query=True)
+    knowledge_base.encode(["用户问题"])
 
+    assert calls[0] == calls[1]
     assert "prompt_name" not in calls[0]
-    assert calls[1]["prompt_name"] == "query"
 
 
-def test_source_signature_changes_with_query_prompt(tmp_path):
-    corpus = tmp_path / "corpus"
-    corpus.mkdir()
-    (corpus / "manual.txt").write_text("运动健康资料", encoding="utf-8")
-
-    without_prompt = build_source_signature(
-        [corpus],
-        embedding_model="test-model",
-        chunk_size=600,
-        overlap=80,
-        query_prompt_name=None,
-    )
-    with_prompt = build_source_signature(
-        [corpus],
-        embedding_model="test-model",
-        chunk_size=600,
-        overlap=80,
-        query_prompt_name="query",
-    )
-
-    assert without_prompt != with_prompt
-
-
-def test_load_falls_back_to_previous_valid_index(monkeypatch, tmp_path):
+def test_saved_index_can_be_loaded(monkeypatch, tmp_path):
     class FakeIndex:
         def __init__(self, dimension):
             self.d = dimension
@@ -164,19 +138,13 @@ def test_load_falls_back_to_previous_valid_index(monkeypatch, tmp_path):
     knowledge_base = FaissKnowledgeBase(index_dir=tmp_path, embedding_model="test-model")
     knowledge_base.save(
         np.ones((1, 3), dtype="float32"),
-        [DocumentChunk(id=0, source="v1", text="上一版")],
-        source_signature="v1",
+        [DocumentChunk(id=0, source="manual", text="运动健康资料")],
+        source_signature="signature",
     )
-    knowledge_base.save(
-        np.ones((1, 3), dtype="float32"),
-        [DocumentChunk(id=0, source="v2", text="当前版")],
-        source_signature="v2",
-    )
-    (tmp_path / "metadata.json").write_text("{broken", encoding="utf-8")
 
-    restored = FaissKnowledgeBase(index_dir=tmp_path, embedding_model="test-model")
-    assert restored.exists is True
-    restored.load()
+    loaded = FaissKnowledgeBase(index_dir=tmp_path, embedding_model="test-model")
+    assert loaded.exists is True
+    loaded.load()
 
-    assert restored.index_info()["loaded_from_backup"] is True
-    assert restored._metadata[0]["text"] == "上一版"
+    assert loaded.index_info()["count"] == 1
+    assert loaded._metadata[0]["text"] == "运动健康资料"

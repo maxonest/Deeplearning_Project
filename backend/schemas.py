@@ -60,4 +60,3 @@ class ConfigResponse(BaseModel):
     local_model_path: str
     local_lora_adapter_path: str | None
     embedding_model: str
-    embedding_query_prompt_name: str

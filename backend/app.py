@@ -68,11 +68,7 @@ def load_knowledge_base() -> None:
         logger.info("Knowledge-base stage 1/2: validating persisted local index.")
         index_info = load()
         chunk_count = int(index_info.get("count", 0))
-        logger.info(
-            "Knowledge-base stage 1/2: loaded %s chunks%s.",
-            chunk_count,
-            " from backup" if index_info.get("loaded_from_backup") else "",
-        )
+        logger.info("Knowledge-base stage 1/2: loaded %s chunks.", chunk_count)
 
         update_startup_state(knowledge_base_chunks=chunk_count)
         hits = retriever.search(settings.knowledge_base_self_test_query, top_k=1)
@@ -92,6 +88,11 @@ def load_knowledge_base() -> None:
         update_startup_state(knowledge_base_error=knowledge_base_error)
         rag_pipeline.disable_retrieval(knowledge_base_error)
         logger.exception("Knowledge-base startup preparation failed.")
+        if settings.retrieval_failure_fallback:
+            logger.warning(
+                "Backend will continue without RAG because RETRIEVAL_FAILURE_FALLBACK=true."
+            )
+            return
         raise RuntimeError(
             "Persisted knowledge base is unavailable. Build it before starting the backend: "
             "python embeddings/embed_utils.py build"
@@ -260,7 +261,6 @@ def get_config() -> ConfigResponse:
             str(settings.local_lora_adapter_path) if settings.local_lora_adapter_path else None
         ),
         embedding_model=settings.embedding_model,
-        embedding_query_prompt_name=settings.embedding_query_prompt_name,
     )
 
 

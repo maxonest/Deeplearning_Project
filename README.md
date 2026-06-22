@@ -67,7 +67,6 @@ pip install -r requirements-windows.txt
 ```
 
 Windows 上建议用 Conda 安装 `faiss-cpu`，其余 Python 包再用 `requirements-windows.txt` 安装。模型提示缺少 fast path 可选加速库时可以先忽略，系统会回退到 PyTorch 实现。
-`Qwen3-Embedding-4B` 需要 `transformers>=4.51.0`，本项目依赖文件已按此版本更新。
 Windows 下暂时固定使用 NumPy 1.26.x，避免 FAISS、SciPy 或 scikit-learn 与 NumPy 2.x
 发生二进制 ABI 冲突。
 
@@ -83,10 +82,9 @@ copy .env.example .env
 USE_LOCAL_MODEL=true
 LOCAL_MODEL_PATH=models/qwen/Qwen3.5-9B
 LOCAL_LORA_ADAPTER_PATH=models/qwen/lora_adapter
-EMBEDDING_MODEL=models/qwen/Qwen3-Embedding-4B
-EMBEDDING_QUERY_PROMPT_NAME=query
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=4
+EMBEDDING_BATCH_SIZE=32
 LOCAL_MODEL_MAX_NEW_TOKENS=2048
 LOCAL_MODEL_TEMPERATURE=0.2
 LOCAL_MODEL_TOP_P=0.9
@@ -244,28 +242,25 @@ data/processed/  # 清洗后的文本、可直接检索的 JSON/JSONL 问答数�
 python utils/prepare_corpus.py
 ```
 
-将完整的 `Qwen3-Embedding-4B` 模型文件放在：
-
-```text
-models/qwen/Qwen3-Embedding-4B
-```
-
-模型目录中应包含 `config.json`、tokenizer 文件和模型权重。当前实现对知识文档直接
-编码，对用户查询使用 Qwen3 Embedding 内置的 `query` prompt，二者都会进行向量归一化。
+默认使用轻量多语言模型
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`。文档和用户问题采用
+完全相同的标准 SentenceTransformer 编码流程，并统一归一化后写入或查询 FAISS。
+第一次运行需要联网下载模型；以后会直接使用 Hugging Face 本地缓存。
 
 首次构建或语料更新后，单独执行知识库构建命令。该命令默认同时读取
 `data/processed/` 和 `data/finetune/sft_dataset_clean.json`：
 
 ```powershell
-python embeddings/embed_utils.py build --device cuda --batch_size 4
+python embeddings/embed_utils.py build
 ```
 
-离线构建结束后进程会释放显存。如果 CUDA 显存不足，将 `--batch_size` 调成 `2` 或
-`1`；没有 CUDA 时可改为 `--device cpu`，但 4B 模型的编码速度会明显变慢。
+从 Qwen3-Embedding-4B 配置切换回来后，旧索引不兼容，需要执行一次上述命令重新构建。
 
-编码时会显示单行进度条。新索引会先写入临时文件并完成读取校验，确认无误后才替换
-正式索引；上一版保存在 `index.faiss.bak` 和 `metadata.json.bak`。如果正式索引损坏，
-后端会自动读取上一版备份。
+默认在 CPU 上构建，不占用对话模型显存。数据量较大时可显式使用
+`--device cuda` 加速。
+
+编码时会显示单行进度条。索引保存在 `embeddings/faiss_index/index.faiss`，文本和
+模型信息保存在同目录的 `metadata.json`。
 
 需要指定语料源时，可重复使用 `--input`：
 
@@ -294,24 +289,23 @@ FAISS 索引持久化在 `embeddings/faiss_index`。构建成功后，后端启�
 推荐配置：
 
 ```env
-EMBEDDING_MODEL=models/qwen/Qwen3-Embedding-4B
-EMBEDDING_QUERY_PROMPT_NAME=query
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 EMBEDDING_DEVICE=cpu
-EMBEDDING_BATCH_SIZE=4
+EMBEDDING_BATCH_SIZE=32
 FAISS_THREADS=1
 FINETUNE_DATASET_PATH=data/finetune/sft_dataset_clean.json
 KNOWLEDGE_BASE_SELF_TEST_QUERY=什么是体适能？
-ISOLATE_RETRIEVAL_PROCESS=true
-RETRIEVAL_FAILURE_FALLBACK=false
+RETRIEVAL_FAILURE_FALLBACK=true
 ```
 
-FAISS 和 SentenceTransformer 默认运行在独立的 CPU 子进程中，避免与加载到 CUDA
-的 9B 模型争抢显存。`EMBEDDING_DEVICE` 控制后端查询时使用的设备，与离线建库命令
-的 `--device` 可以不同；索引和查询必须使用同一个 Embedding 模型及 `query` prompt。
+RAG 使用普通的进程内调用链：SentenceTransformer 编码问题、FAISS 检索 top-k、
+将命中文档拼接进提示词，再交给本地模型回答。索引构建和查询必须使用同一个
+Embedding 模型。
 
 `/health` 会返回 `knowledge_base_ready`、`knowledge_base_chunks` 和
-`knowledge_base_error`。默认 `RETRIEVAL_FAILURE_FALLBACK=false`，因此本地索引缺失、
-格式错误或检索自检失败时，后端不会加载模型，前端保持锁定并提示先运行构建命令。
+`knowledge_base_error`。默认 `RETRIEVAL_FAILURE_FALLBACK=true`，因此索引缺失或损坏
+时后端仍会加载模型并进入降级状态，普通聊天仍可使用；重新运行 `build` 并重启后端
+即可恢复 RAG。
 
 稳定启动顺序为：读取本地索引、完整性校验、检索自检、加载基础模型、挂载 LoRA、
 后端就绪、前端自动解锁。

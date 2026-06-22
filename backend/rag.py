@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
-import sys
 from pathlib import Path
-from threading import RLock
 from typing import Any, Iterator, Protocol
 
 from backend.llm import LLMClient, build_llm_client
@@ -16,15 +12,11 @@ from utils.prompts import SPORTS_HEALTH_SYSTEM_PROMPT
 
 
 logger = logging.getLogger("uvicorn.error")
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 INDEX_FILES = ("index.faiss", "metadata.json")
-BACKUP_INDEX_FILES = ("index.faiss.bak", "metadata.json.bak")
 
 
 def persisted_index_exists(index_dir: Path) -> bool:
-    return all((index_dir / name).exists() for name in INDEX_FILES) or all(
-        (index_dir / name).exists() for name in BACKUP_INDEX_FILES
-    )
+    return all((index_dir / name).exists() for name in INDEX_FILES)
 
 
 class Retriever(Protocol):
@@ -39,14 +31,12 @@ class FaissRetriever:
         self,
         index_dir: str | Path,
         embedding_model: str,
-        query_prompt_name: str | None = "query",
         embedding_device: str | None = None,
-        embedding_batch_size: int = 4,
+        embedding_batch_size: int = 32,
         faiss_threads: int = 1,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
-        self.query_prompt_name = query_prompt_name
         self.embedding_device = embedding_device
         self.embedding_batch_size = embedding_batch_size
         self.faiss_threads = faiss_threads
@@ -63,7 +53,6 @@ class FaissRetriever:
             self._kb = FaissKnowledgeBase(
                 index_dir=self.index_dir,
                 embedding_model=self.embedding_model,
-                query_prompt_name=self.query_prompt_name,
                 device=self.embedding_device,
                 batch_size=self.embedding_batch_size,
                 faiss_threads=self.faiss_threads,
@@ -82,119 +71,6 @@ class FaissRetriever:
         if not self.exists:
             return []
         return self._knowledge_base().search(query, top_k=top_k)
-
-
-class IsolatedFaissRetriever:
-    """Keep FAISS and sentence-transformers outside the model process."""
-
-    def __init__(
-        self,
-        index_dir: str | Path,
-        embedding_model: str,
-        query_prompt_name: str | None = "query",
-        embedding_device: str | None = "cpu",
-        embedding_batch_size: int = 4,
-        faiss_threads: int = 1,
-    ) -> None:
-        self.index_dir = Path(index_dir)
-        self.embedding_model = embedding_model
-        self.query_prompt_name = query_prompt_name
-        self.embedding_device = embedding_device or "cpu"
-        self.embedding_batch_size = embedding_batch_size
-        self.faiss_threads = faiss_threads
-        self._process: subprocess.Popen | None = None
-        self._lock = RLock()
-
-    @property
-    def exists(self) -> bool:
-        return persisted_index_exists(self.index_dir)
-
-    def _start(self) -> subprocess.Popen:
-        if self._process is not None and self._process.poll() is None:
-            return self._process
-
-        worker_path = PROJECT_ROOT / "embeddings" / "retrieval_worker.py"
-        command = [
-            sys.executable,
-            "-X",
-            "faulthandler",
-            "-u",
-            str(worker_path),
-            "--index",
-            str(self.index_dir),
-            "--model",
-            self.embedding_model,
-            "--query-prompt-name",
-            self.query_prompt_name or "",
-            "--device",
-            self.embedding_device,
-            "--batch-size",
-            str(self.embedding_batch_size),
-            "--faiss-threads",
-            str(self.faiss_threads),
-        ]
-        logger.info("Starting isolated retrieval worker.")
-        self._process = subprocess.Popen(
-            command,
-            cwd=str(PROJECT_ROOT),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=None,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-        return self._process
-
-    def _request(self, command: str, **payload):
-        with self._lock:
-            process = self._start()
-            if process.stdin is None or process.stdout is None:
-                raise RuntimeError("Retrieval worker pipes are unavailable.")
-            request = {"command": command, **payload}
-            try:
-                process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-                process.stdin.flush()
-                response_line = process.stdout.readline()
-            except (BrokenPipeError, OSError) as exc:
-                raise RuntimeError("Retrieval worker communication failed.") from exc
-
-            while response_line:
-                response = json.loads(response_line)
-                if not response.get("ok"):
-                    raise RuntimeError(response.get("error", "Retrieval worker failed."))
-                return response.get("result")
-
-            return_code = process.poll()
-            self._process = None
-            raise RuntimeError(
-                "Retrieval worker exited unexpectedly"
-                + (f" with code {return_code}" if return_code is not None else "")
-                + ". The API process remains available."
-            )
-
-    def load(self) -> dict[str, Any]:
-        return dict(self._request("load"))
-
-    def search(self, query: str, top_k: int) -> list[dict[str, Any]]:
-        if not self.exists:
-            return []
-        return list(self._request("search", query=query, top_k=top_k))
-
-    def close(self) -> None:
-        with self._lock:
-            process = self._process
-            self._process = None
-            if process is None or process.poll() is not None:
-                return
-            try:
-                if process.stdin is not None:
-                    process.stdin.write('{"command":"shutdown"}\n')
-                    process.stdin.flush()
-                process.wait(timeout=5)
-            except Exception:
-                process.terminate()
 
 
 class RAGPipeline:
@@ -217,15 +93,9 @@ class RAGPipeline:
         if retriever is not None:
             self.retriever = retriever
         else:
-            retriever_class = (
-                IsolatedFaissRetriever
-                if settings.isolate_retrieval_process
-                else FaissRetriever
-            )
-            self.retriever = retriever_class(
+            self.retriever = FaissRetriever(
                 index_dir=settings.faiss_index_dir,
                 embedding_model=settings.embedding_model,
-                query_prompt_name=settings.embedding_query_prompt_name,
                 embedding_device=settings.embedding_device,
                 embedding_batch_size=settings.embedding_batch_size,
                 faiss_threads=settings.faiss_threads,

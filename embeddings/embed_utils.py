@@ -28,21 +28,17 @@ from utils.embedding_defaults import (
     DEFAULT_EMBEDDING_BATCH_SIZE,
     DEFAULT_EMBEDDING_DEVICE,
     DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_EMBEDDING_QUERY_PROMPT_NAME,
 )
 
 
 INDEX_FILE = "index.faiss"
 METADATA_FILE = "metadata.json"
-INDEX_BACKUP_FILE = "index.faiss.bak"
-METADATA_BACKUP_FILE = "metadata.json.bak"
-DEFAULT_QUERY_PROMPT_NAME = DEFAULT_EMBEDDING_QUERY_PROMPT_NAME
 DEFAULT_INDEX_DIR = PROJECT_ROOT / "embeddings" / "faiss_index"
 DEFAULT_PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
 DEFAULT_CHUNK_SIZE = 600
 DEFAULT_CHUNK_OVERLAP = 80
 DEFAULT_TOP_K = 5
-INDEX_FORMAT_VERSION = 3
+INDEX_FORMAT_VERSION = 4
 CORPUS_SUFFIXES = {".txt", ".md", ".csv", ".json", ".jsonl"}
 
 
@@ -91,13 +87,11 @@ def build_source_signature(
     embedding_model: str,
     chunk_size: int,
     overlap: int,
-    query_prompt_name: str | None = None,
 ) -> str:
     """Return a stable content fingerprint for all knowledge-base inputs."""
 
     digest = hashlib.sha256()
     digest.update(f"embedding_model={embedding_model}\n".encode())
-    digest.update(f"query_prompt_name={query_prompt_name or ''}\n".encode())
     digest.update(f"chunk_size={chunk_size}\n".encode())
     digest.update(f"overlap={overlap}\n".encode())
 
@@ -178,14 +172,12 @@ class FaissKnowledgeBase:
         self,
         index_dir: str | Path = DEFAULT_INDEX_DIR,
         embedding_model: str = DEFAULT_EMBEDDING_MODEL,
-        query_prompt_name: str | None = DEFAULT_QUERY_PROMPT_NAME,
         batch_size: int = DEFAULT_EMBEDDING_BATCH_SIZE,
         device: str | None = None,
         faiss_threads: int = 1,
     ) -> None:
         self.index_dir = Path(index_dir)
         self.embedding_model = embedding_model
-        self.query_prompt_name = query_prompt_name or None
         self.batch_size = batch_size
         self.device = device
         self.faiss_threads = max(1, faiss_threads)
@@ -194,19 +186,13 @@ class FaissKnowledgeBase:
         self._metadata: list[dict[str, Any]] | None = None
         self._manifest: dict[str, Any] | None = None
         self._lock = RLock()
-        self._loaded_from_backup = False
 
     @property
     def exists(self) -> bool:
-        primary_exists = (
+        return (
             (self.index_dir / INDEX_FILE).exists()
             and (self.index_dir / METADATA_FILE).exists()
         )
-        backup_exists = (
-            (self.index_dir / INDEX_BACKUP_FILE).exists()
-            and (self.index_dir / METADATA_BACKUP_FILE).exists()
-        )
-        return primary_exists or backup_exists
 
     def index_info(self) -> dict[str, Any]:
         if self._index is None or self._metadata is None:
@@ -216,10 +202,8 @@ class FaissKnowledgeBase:
         return {
             "count": len(self._metadata),
             "dimension": int(self._index.d),
-            "loaded_from_backup": self._loaded_from_backup,
             "built_at": (self._manifest or {}).get("built_at"),
             "embedding_model": (self._manifest or {}).get("embedding_model"),
-            "query_prompt_name": (self._manifest or {}).get("query_prompt_name"),
             "source_signature": (self._manifest or {}).get("source_signature"),
             "sources": (self._manifest or {}).get("sources", []),
             "chunk_size": (self._manifest or {}).get("chunk_size"),
@@ -250,8 +234,8 @@ class FaissKnowledgeBase:
         if not resolved_path.is_dir():
             raise FileNotFoundError(
                 f"Local embedding model path does not exist: {resolved_path}. "
-                "Place Qwen3-Embedding-4B in models/qwen/Qwen3-Embedding-4B "
-                "or set EMBEDDING_MODEL to its actual local directory."
+                "Set EMBEDDING_MODEL to a valid local model directory or a "
+                "SentenceTransformers model name."
             )
         return str(resolved_path)
 
@@ -265,7 +249,6 @@ class FaissKnowledgeBase:
         self,
         texts: list[str],
         progress_callback: Callable[[int, int], None] | None = None,
-        is_query: bool = False,
     ) -> np.ndarray:
         if not texts:
             raise ValueError("texts must not be empty.")
@@ -274,9 +257,6 @@ class FaissKnowledgeBase:
         if progress_callback is not None:
             progress_callback(0, total)
         encoder = self._encoder()
-        encode_kwargs: dict[str, Any] = {}
-        if is_query and self.query_prompt_name:
-            encode_kwargs["prompt_name"] = self.query_prompt_name
         if progress_callback is None:
             embeddings = encoder.encode(
                 texts,
@@ -284,7 +264,6 @@ class FaissKnowledgeBase:
                 convert_to_numpy=True,
                 normalize_embeddings=True,
                 show_progress_bar=False,
-                **encode_kwargs,
             )
             return np.ascontiguousarray(embeddings, dtype="float32")
 
@@ -297,7 +276,6 @@ class FaissKnowledgeBase:
                 convert_to_numpy=True,
                 normalize_embeddings=True,
                 show_progress_bar=False,
-                **encode_kwargs,
             )
             batches.append(np.ascontiguousarray(batch_embeddings, dtype="float32"))
             progress_callback(min(start + len(batch_texts), total), total)
@@ -327,7 +305,6 @@ class FaissKnowledgeBase:
             embedding_model=self.embedding_model,
             chunk_size=chunk_size,
             overlap=overlap,
-            query_prompt_name=self.query_prompt_name,
         )
         with self._lock:
             embeddings = self.encode(
@@ -369,7 +346,6 @@ class FaissKnowledgeBase:
             "format_version": INDEX_FORMAT_VERSION,
             "built_at": datetime.now(timezone.utc).isoformat(),
             "embedding_model": self.embedding_model,
-            "query_prompt_name": self.query_prompt_name,
             "dimension": int(embeddings.shape[1]),
             "source_signature": source_signature,
             "sources": sources or [],
@@ -379,8 +355,6 @@ class FaissKnowledgeBase:
         }
         index_path = self.index_dir / INDEX_FILE
         metadata_path = self.index_dir / METADATA_FILE
-        backup_index_path = self.index_dir / INDEX_BACKUP_FILE
-        backup_metadata_path = self.index_dir / METADATA_BACKUP_FILE
         temp_index_path = self.index_dir / f"{INDEX_FILE}.tmp"
         temp_metadata_path = self.index_dir / f"{METADATA_FILE}.tmp"
         try:
@@ -390,41 +364,14 @@ class FaissKnowledgeBase:
                 encoding="utf-8",
             )
             self._validate_index_pair(temp_index_path, temp_metadata_path)
-
-            primary_is_valid = False
-            if index_path.exists() and metadata_path.exists():
-                try:
-                    self._validate_index_pair(index_path, metadata_path)
-                    primary_is_valid = True
-                except Exception:
-                    primary_is_valid = False
-
-            if primary_is_valid:
-                backup_index_path.unlink(missing_ok=True)
-                backup_metadata_path.unlink(missing_ok=True)
-                os.replace(index_path, backup_index_path)
-                os.replace(metadata_path, backup_metadata_path)
-            else:
-                index_path.unlink(missing_ok=True)
-                metadata_path.unlink(missing_ok=True)
-
             os.replace(temp_index_path, index_path)
             os.replace(temp_metadata_path, metadata_path)
-        except Exception:
-            index_path.unlink(missing_ok=True)
-            metadata_path.unlink(missing_ok=True)
-            if backup_index_path.exists():
-                os.replace(backup_index_path, index_path)
-            if backup_metadata_path.exists():
-                os.replace(backup_metadata_path, metadata_path)
-            raise
         finally:
             temp_index_path.unlink(missing_ok=True)
             temp_metadata_path.unlink(missing_ok=True)
         self._index = index
         self._metadata = payload["chunks"]
         self._manifest = payload
-        self._loaded_from_backup = False
 
     def _validate_index_pair(self, index_path: Path, metadata_path: Path):
         faiss = self._faiss()
@@ -440,18 +387,11 @@ class FaissKnowledgeBase:
 
         metadata = payload.get("chunks", [])
         stored_model = payload.get("embedding_model")
-        stored_query_prompt_name = payload.get("query_prompt_name")
         stored_dimension = payload.get("dimension")
         if stored_model != self.embedding_model:
             raise RuntimeError(
                 "FAISS embedding model mismatch: "
                 f"index={stored_model!r}, runtime={self.embedding_model!r}. "
-                "Run the knowledge-base build command."
-            )
-        if stored_query_prompt_name != self.query_prompt_name:
-            raise RuntimeError(
-                "FAISS query prompt mismatch: "
-                f"index={stored_query_prompt_name!r}, runtime={self.query_prompt_name!r}. "
                 "Run the knowledge-base build command."
             )
         if stored_dimension != index.d:
@@ -468,44 +408,15 @@ class FaissKnowledgeBase:
         with self._lock:
             index_path = self.index_dir / INDEX_FILE
             metadata_path = self.index_dir / METADATA_FILE
-            backup_index_path = self.index_dir / INDEX_BACKUP_FILE
-            backup_metadata_path = self.index_dir / METADATA_BACKUP_FILE
-
-            primary_error = None
-            if index_path.exists() and metadata_path.exists():
-                try:
-                    index, metadata, manifest = self._validate_index_pair(index_path, metadata_path)
-                    self._index = index
-                    self._metadata = metadata
-                    self._manifest = manifest
-                    self._loaded_from_backup = False
-                    return
-                except Exception as exc:
-                    primary_error = exc
-
-            if backup_index_path.exists() and backup_metadata_path.exists():
-                try:
-                    index, metadata, manifest = self._validate_index_pair(
-                        backup_index_path,
-                        backup_metadata_path,
-                    )
-                    self._index = index
-                    self._metadata = metadata
-                    self._manifest = manifest
-                    self._loaded_from_backup = True
-                    return
-                except Exception as backup_error:
-                    raise RuntimeError(
-                        f"Primary and backup FAISS indexes are invalid. "
-                        f"primary={primary_error}; backup={backup_error}"
-                    ) from backup_error
-
-            if primary_error is not None:
-                raise RuntimeError(f"Local FAISS index is invalid: {primary_error}") from primary_error
-            raise FileNotFoundError(
-                f"FAISS index not found in {self.index_dir}. "
-                "Run: python embeddings/embed_utils.py build"
-            )
+            if not self.exists:
+                raise FileNotFoundError(
+                    f"FAISS index not found in {self.index_dir}. "
+                    "Run: python embeddings/embed_utils.py build"
+                )
+            index, metadata, manifest = self._validate_index_pair(index_path, metadata_path)
+            self._index = index
+            self._metadata = metadata
+            self._manifest = manifest
 
     def needs_rebuild(
         self,
@@ -526,12 +437,10 @@ class FaissKnowledgeBase:
             embedding_model=self.embedding_model,
             chunk_size=chunk_size,
             overlap=overlap,
-            query_prompt_name=self.query_prompt_name,
         )
         return (
             payload.get("format_version") != INDEX_FORMAT_VERSION
             or payload.get("embedding_model") != self.embedding_model
-            or payload.get("query_prompt_name") != self.query_prompt_name
             or payload.get("source_signature") != expected_signature
         )
 
@@ -545,7 +454,7 @@ class FaissKnowledgeBase:
             assert self._index is not None
             assert self._metadata is not None
 
-            query_vector = self.encode([query], is_query=True)
+            query_vector = self.encode([query])
             if query_vector.ndim != 2 or query_vector.shape[1] != self._index.d:
                 raise RuntimeError(
                     f"Query embedding dimension {query_vector.shape} does not match FAISS index dimension "
@@ -577,7 +486,6 @@ def parse_args() -> argparse.Namespace:
     )
     build_parser.add_argument("--output", default=str(DEFAULT_INDEX_DIR))
     build_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
-    build_parser.add_argument("--query_prompt_name", default=DEFAULT_QUERY_PROMPT_NAME)
     build_parser.add_argument("--chunk_size", type=int, default=DEFAULT_CHUNK_SIZE)
     build_parser.add_argument("--overlap", type=int, default=DEFAULT_CHUNK_OVERLAP)
     build_parser.add_argument("--batch_size", type=int, default=DEFAULT_EMBEDDING_BATCH_SIZE)
@@ -588,7 +496,6 @@ def parse_args() -> argparse.Namespace:
     query_parser.add_argument("query")
     query_parser.add_argument("--index", default=str(DEFAULT_INDEX_DIR))
     query_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
-    query_parser.add_argument("--query_prompt_name", default=DEFAULT_QUERY_PROMPT_NAME)
     query_parser.add_argument("--top_k", type=int, default=DEFAULT_TOP_K)
     query_parser.add_argument("--device", default=DEFAULT_EMBEDDING_DEVICE)
     query_parser.add_argument("--faiss_threads", type=int, default=1)
@@ -596,7 +503,6 @@ def parse_args() -> argparse.Namespace:
     status_parser = subparsers.add_parser("status")
     status_parser.add_argument("--index", default=str(DEFAULT_INDEX_DIR))
     status_parser.add_argument("--model", default=DEFAULT_EMBEDDING_MODEL)
-    status_parser.add_argument("--query_prompt_name", default=DEFAULT_QUERY_PROMPT_NAME)
     status_parser.add_argument("--faiss_threads", type=int, default=1)
 
     return parser.parse_args()
@@ -625,7 +531,6 @@ def main() -> None:
         kb = FaissKnowledgeBase(
             index_dir=output_path,
             embedding_model=args.model,
-            query_prompt_name=args.query_prompt_name,
             batch_size=args.batch_size,
             device=args.device,
             faiss_threads=args.faiss_threads,
@@ -660,7 +565,6 @@ def main() -> None:
         kb = FaissKnowledgeBase(
             index_dir=index_path,
             embedding_model=args.model,
-            query_prompt_name=args.query_prompt_name,
             device=args.device,
             faiss_threads=args.faiss_threads,
         )
@@ -670,7 +574,6 @@ def main() -> None:
         kb = FaissKnowledgeBase(
             index_dir=index_path,
             embedding_model=args.model,
-            query_prompt_name=args.query_prompt_name,
             faiss_threads=args.faiss_threads,
         )
         kb.load()
@@ -681,7 +584,6 @@ def main() -> None:
                     **info,
                     "index_dir": str(index_path.resolve()),
                     "embedding_model": args.model,
-                    "query_prompt_name": args.query_prompt_name,
                 },
                 ensure_ascii=False,
                 indent=2,

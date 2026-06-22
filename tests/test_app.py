@@ -46,7 +46,7 @@ class FakeRetriever:
     exists = False
 
     def load(self):
-        return {"count": 12, "dimension": 384, "loaded_from_backup": False}
+        return {"count": 12, "dimension": 384}
 
     def close(self):
         return
@@ -126,6 +126,7 @@ def test_invalid_index_fails_without_rebuilding(monkeypatch):
         lambda: (_ for _ in ()).throw(RuntimeError("invalid local index")),
     )
     monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+    monkeypatch.setattr(app_module.settings, "retrieval_failure_fallback", False)
 
     try:
         app_module.load_knowledge_base()
@@ -136,6 +137,22 @@ def test_invalid_index_fails_without_rebuilding(monkeypatch):
 
     assert pipeline.retrieval_enabled is False
     assert "invalid local index" in app_module.startup_state["knowledge_base_error"]
+
+
+def test_invalid_index_can_fall_back_to_model_only(monkeypatch):
+    pipeline = FakePipeline()
+    monkeypatch.setattr(
+        pipeline.retriever,
+        "load",
+        lambda: (_ for _ in ()).throw(RuntimeError("invalid local index")),
+    )
+    monkeypatch.setattr(app_module, "rag_pipeline", pipeline)
+    monkeypatch.setattr(app_module.settings, "retrieval_failure_fallback", True)
+
+    app_module.load_knowledge_base()
+
+    assert app_module.startup_state["knowledge_base_ready"] is False
+    assert pipeline.retrieval_enabled is False
 
 
 def test_chat_endpoint_uses_pipeline(monkeypatch):
